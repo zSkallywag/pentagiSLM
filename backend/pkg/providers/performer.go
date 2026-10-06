@@ -158,7 +158,10 @@ func (fp *flowProvider) performAgentChain(
 			callContext := executionContext
 			if block := fp.smallModelStateBlock(taskID); block != "" {
 				callContext = "CURRENT STATE (authoritative; built from tool output, survives summarization):\n" +
-					block + "\n\n" + executionContext
+					block + "\n\n" + callContext
+			}
+			if fsBlock := fp.smallModelFewshotBlock(fp.getLastHumanMessage(chain)); fsBlock != "" {
+				callContext = fsBlock + "\n\n" + callContext
 			}
 
 			result, err = fp.callWithRetries(ctx, optAgentType, chainID, taskID, subtaskID, chain, executor, callContext)

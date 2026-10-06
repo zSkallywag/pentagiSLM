@@ -291,6 +291,11 @@ type Config struct {
 	// shell command as destructive and requiring confirmation; empty uses the
 	// verifier's built-in list.
 	SmallModelDeniedCommands string `env:"SMALL_MODEL_DENIED_COMMANDS" envDefault:""`
+	// SmallModelFewshotFile points to a JSON file of {input, output} examples the
+	// agent is shown, the most similar ones selected per turn. Empty disables
+	// few-shot injection.
+	SmallModelFewshotFile string `env:"SMALL_MODEL_FEWSHOT_FILE" envDefault:""`
+	SmallModelFewshotK    int    `env:"SMALL_MODEL_FEWSHOT_K" envDefault:"3"`
 
 	// === Network Proxy Settings ===
 	ProxyURL string `env:"PROXY_URL"`
@@ -409,6 +414,15 @@ func applySmallModelProfile(config *Config) {
 	lowerIfUnset("SUMMARIZER_MAX_BP_BYTES", &config.SummarizerMaxBPBytes, 7*1024)
 	lowerIfUnset("SUMMARIZER_MAX_QA_SECTIONS", &config.SummarizerMaxQASections, 4)
 	lowerIfUnset("SUMMARIZER_MAX_QA_BYTES", &config.SummarizerMaxQABytes, 22*1024)
+
+	// Escalate hard cases to the (operator-configured, typically larger) adviser
+	// agent sooner by enabling and tightening the execution monitor when the
+	// operator has not configured it.
+	if _, set := os.LookupEnv("EXECUTION_MONITOR_ENABLED"); !set {
+		config.ExecutionMonitorEnabled = true
+	}
+	lowerIfUnset("EXECUTION_MONITOR_SAME_TOOL_LIMIT", &config.ExecutionMonitorSameToolLimit, 3)
+	lowerIfUnset("EXECUTION_MONITOR_TOTAL_TOOL_LIMIT", &config.ExecutionMonitorTotalToolLimit, 8)
 }
 
 func ensureInstallationID(config *Config) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/sirupsen/logrus"
 	"github.com/vxcontrol/langchaingo/llms"
 
 	"pentagi/pkg/cast"
@@ -116,6 +117,39 @@ func (fp *flowProvider) smallModelStateBlock(taskID *int64) string {
 		return ""
 	}
 	return fp.smallModelState().Block(smallmodel.Key{FlowID: fp.flowID, TaskID: *taskID})
+}
+
+// smallModelExamples lazily loads the few-shot example set from the configured
+// file. It records that it tried so a missing or malformed file is not re-read
+// every turn, and returns nil on any error (few-shot is then simply skipped).
+func (fp *flowProvider) smallModelExamples() *smallmodel.ExampleSet {
+	fp.mx.Lock()
+	defer fp.mx.Unlock()
+	if fp.smFewshotTried {
+		return fp.smFewshot
+	}
+	fp.smFewshotTried = true
+	set, err := smallmodel.LoadExamples(fp.cfg.SmallModelFewshotFile)
+	if err != nil {
+		logrus.WithError(err).Warn("failed to load small-model few-shot examples, continuing without them")
+		return nil
+	}
+	fp.smFewshot = set
+	return set
+}
+
+// smallModelFewshotBlock returns the few-shot block most relevant to query, or
+// an empty string when the profile is off, no file is configured, or nothing
+// matches.
+func (fp *flowProvider) smallModelFewshotBlock(query string) string {
+	if !fp.smallModelEnabled() || fp.cfg.SmallModelFewshotFile == "" || query == "" {
+		return ""
+	}
+	set := fp.smallModelExamples()
+	if set == nil {
+		return ""
+	}
+	return set.Block(query, fp.cfg.SmallModelFewshotK)
 }
 
 // smallModelCompactIfOverBudget compacts the chain when it exceeds the token

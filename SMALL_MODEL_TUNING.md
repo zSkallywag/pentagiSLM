@@ -14,7 +14,11 @@ SMALL_MODEL_TOOL_OUTPUT_MAX_BYTES=6144
 SMALL_MODEL_VERIFIER_ENABLED=true
 SMALL_MODEL_SCOPE=10.0.0.5/32          # authorized targets; empty disables scope checks
 SMALL_MODEL_DENIED_COMMANDS=           # extra destructive substrings, comma-separated
+SMALL_MODEL_FEWSHOT_FILE=              # path to a JSON array of {input, output}; empty disables few-shot
+SMALL_MODEL_FEWSHOT_K=3
 ```
+
+With the profile on, the execution monitor is enabled automatically so hard cases escalate to the `adviser` agent — point that role at a larger model. Set `EXECUTION_MONITOR_ENABLED=false` to opt out.
 
 With `SMALL_MODEL_MODE=true`, the `SUMMARIZER_*` thresholds the operator has not set explicitly are lowered to small-model starting points (`applySmallModelProfile` in `backend/pkg/config/config.go`). An explicit `SUMMARIZER_*` value always wins.
 
@@ -29,6 +33,14 @@ With `SMALL_MODEL_MODE=true`, the `SUMMARIZER_*` thresholds the operator has not
 7. **Explicit repair of orphaned tool calls.** `FallbackResponseContent` (`backend/pkg/cast/chain_ast.go`) now tells the model the call may have partially executed and to verify state before retrying, instead of "please try again".
 8. **A verifier at the critical points.** `smallmodel.Verifier` (`verifier.go`) classifies commands before execution: destructive patterns and out-of-scope targets become `Confirm` and are blocked fail-closed in `execToolCall` with an explanatory tool response. Scope comes from `SMALL_MODEL_SCOPE`.
 9. **Measure.** See `small-model-eval/` for the methodology, metrics, and scenario format.
+
+## Harness additions
+
+On top of the nine points, three items from the general small-model harness playbook are wired here:
+
+- **Constrained decoding.** Already present in PentAGI: the JSON-producing agents run on `OptionsTypeSimpleJSON`, which applies `llms.WithJSONMode()` (json_object), and `tool_call_fixer` uses it. The finer json_schema form is deliberately avoided for provider compatibility (see the deepseek/glm notes in `pkg/providers/openaicompat`), so the small-model profile relies on json_object plus the sanitize→validate→repair path rather than schema-forcing every call, which would break the tool-call protocol.
+- **Escalation to a bigger model.** `applySmallModelProfile` enables and tightens the execution monitor (`EXECUTION_MONITOR_*`) when the operator has not set it. When the agent repeats a tool or runs long, PentAGI invokes the adviser (mentor) agent — assign a larger model to the `adviser` role and hard cases are reviewed by it, the easy majority staying on the small model. Explicit `EXECUTION_MONITOR_*` values still win.
+- **Dynamic few-shot.** `smallmodel.ExampleSet` (`fewshot.go`) selects the examples most similar to the current situation (token-overlap ranking) from a JSON file named by `SMALL_MODEL_FEWSHOT_FILE`, and `performAgentChain` prepends up to `SMALL_MODEL_FEWSHOT_K` of them to the prompt. Empty file disables it.
 
 ## Where the code lives
 

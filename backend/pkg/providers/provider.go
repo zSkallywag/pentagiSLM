@@ -169,8 +169,10 @@ type flowProvider struct {
 	maxLACallsLimit int
 	buildMonitor    executionMonitorBuilder
 
-	smVerifier *smallmodel.Verifier
-	smState    *smallmodel.Store
+	smVerifier     *smallmodel.Verifier
+	smState        *smallmodel.Store
+	smFewshot      *smallmodel.ExampleSet
+	smFewshotTried bool
 
 	provider.Provider
 }
