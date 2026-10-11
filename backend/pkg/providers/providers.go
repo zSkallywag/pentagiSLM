@@ -27,6 +27,7 @@ import (
 	"pentagi/pkg/providers/pconfig"
 	"pentagi/pkg/providers/provider"
 	"pentagi/pkg/providers/tester"
+	"pentagi/pkg/smallmodel"
 	"pentagi/pkg/templates"
 	"pentagi/pkg/tools"
 
@@ -316,7 +317,23 @@ func (pc *providerController) NewFlowProvider(
 	policy := newImagePolicy(pc.cfg, pc.docker.GetDefaultImage())
 
 	image := policy.pentestImage()
-	if !policy.skipsModel() {
+	imageChosen := false
+	if !policy.skipsModel() && pc.cfg.SmallModelMode && pc.cfg.SmallModelClassifierURL != "" {
+		labels, byLabel := classifierImageLabels(pc.docker.GetDefaultImage(), pc.cfg.DockerDefaultImageForPentest)
+		if label, score, err := smallmodel.NewClassifier(pc.cfg.SmallModelClassifierURL).Choose(ctx, input, labels); err != nil {
+			logrus.WithError(err).Warn("classifier image selection failed, falling back to model")
+		} else if img, ok := byLabel[label]; ok {
+			image = img
+			imageChosen = true
+			logrus.WithFields(logrus.Fields{
+				"flow_id": flowID,
+				"image":   img,
+				"label":   label,
+				"score":   score,
+			}).Info("docker image selected by classifier sidecar")
+		}
+	}
+	if !imageChosen && !policy.skipsModel() {
 		imageTmpl, err := prompter.RenderTemplate(templates.PromptTypeImageChooser, map[string]any{
 			"DefaultImage":           pc.docker.GetDefaultImage(),
 			"DefaultImageForPentest": pc.cfg.DockerDefaultImageForPentest,

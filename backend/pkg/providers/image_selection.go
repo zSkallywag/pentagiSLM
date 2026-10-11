@@ -102,3 +102,22 @@ func (fp *flowProvider) isPentestImage() bool {
 
 	return strings.HasPrefix(normalizeImage(fp.image), pentest)
 }
+
+// classifierImageLabels maps candidate container images to the descriptive
+// labels the zero-shot classifier scores against, plus the reverse map to
+// resolve a chosen label back to an image. defaultImage and pentestImage come
+// from config so the set tracks the deployment.
+func classifierImageLabels(defaultImage, pentestImage string) ([]string, map[string]string) {
+	byLabel := map[string]string{
+		"penetration testing and security tools": normalizeImage(pentestImage),
+		"python programming":                     "python:latest",
+		"node.js and javascript development":     "node:latest",
+		"go programming":                         "golang:latest",
+		"general purpose linux shell commands":   normalizeImage(defaultImage),
+	}
+	labels := make([]string, 0, len(byLabel))
+	for l := range byLabel {
+		labels = append(labels, l)
+	}
+	return labels, byLabel
+}

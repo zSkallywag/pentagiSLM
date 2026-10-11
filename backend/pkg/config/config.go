@@ -296,6 +296,11 @@ type Config struct {
 	// few-shot injection.
 	SmallModelFewshotFile string `env:"SMALL_MODEL_FEWSHOT_FILE" envDefault:""`
 	SmallModelFewshotK    int    `env:"SMALL_MODEL_FEWSHOT_K" envDefault:"3"`
+	// SmallModelClassifierURL is the base URL of the zero-shot decision sidecar.
+	// When set (and the profile is on), discrete choices such as container-image
+	// selection are offloaded to it instead of the generative model. Empty
+	// disables it and those choices stay on the model.
+	SmallModelClassifierURL string `env:"SMALL_MODEL_CLASSIFIER_URL" envDefault:""`
 
 	// === Network Proxy Settings ===
 	ProxyURL string `env:"PROXY_URL"`

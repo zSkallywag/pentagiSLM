@@ -42,6 +42,12 @@ On top of the nine points, three items from the general small-model harness play
 - **Escalation to a bigger model.** `applySmallModelProfile` enables and tightens the execution monitor (`EXECUTION_MONITOR_*`) when the operator has not set it. When the agent repeats a tool or runs long, PentAGI invokes the adviser (mentor) agent — assign a larger model to the `adviser` role and hard cases are reviewed by it, the easy majority staying on the small model. Explicit `EXECUTION_MONITOR_*` values still win.
 - **Dynamic few-shot.** `smallmodel.ExampleSet` (`fewshot.go`) selects the examples most similar to the current situation (token-overlap ranking) from a JSON file named by `SMALL_MODEL_FEWSHOT_FILE`, and `performAgentChain` prepends up to `SMALL_MODEL_FEWSHOT_K` of them to the prompt. Empty file disables it.
 
+## Decision classifier (offload discrete choices)
+
+Some decisions in the pipeline are closed-set classifications, not generation — picking a container image, and later allow/deny or success/failure. A small generative model is slow and can ramble or hallucinate on these. `smallmodel.Classifier` (`classifier.go`) offloads them to a zero-shot classifier served over HTTP, pointed at by `SMALL_MODEL_CLASSIFIER_URL`.
+
+Wired today for container-image selection: when the profile is on and the URL is set, `NewFlowProvider` asks the classifier to choose the image from a labelled candidate set instead of calling the generative model, and falls back to the model if the classifier is unreachable. A reference sidecar (a DeBERTa-v3 zero-shot model behind FastAPI) and the image-selection benchmark live in `small-model-eval/classifier-sidecar/`. On that benchmark the classifier matched the generative model's accuracy while running on CPU, ~2× faster and deterministically.
+
 ## Where the code lives
 
 - `backend/pkg/smallmodel/` — the self-contained logic (budget, state, extraction, tool-output compaction, verifier) with unit tests.

@@ -164,7 +164,7 @@ func clearConfigEnv(t *testing.T) {
 		"SMALL_MODEL_MODE", "SMALL_MODEL_CTX_WINDOW", "SMALL_MODEL_CTX_BUDGET_PERCENT",
 		"SMALL_MODEL_BYTES_PER_TOKEN", "SMALL_MODEL_TOOL_OUTPUT_MAX_BYTES",
 		"SMALL_MODEL_VERIFIER_ENABLED", "SMALL_MODEL_SCOPE", "SMALL_MODEL_DENIED_COMMANDS",
-		"SMALL_MODEL_FEWSHOT_FILE", "SMALL_MODEL_FEWSHOT_K",
+		"SMALL_MODEL_FEWSHOT_FILE", "SMALL_MODEL_FEWSHOT_K", "SMALL_MODEL_CLASSIFIER_URL",
 		"PROXY_URL", "EXTERNAL_SSL_CA_PATH", "EXTERNAL_SSL_INSECURE", "HTTP_CLIENT_TIMEOUT",
 		"OTEL_HOST", "LANGFUSE_BASE_URL", "LANGFUSE_PROJECT_ID", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY",
 		"GRAPHITI_ENABLED", "GRAPHITI_TIMEOUT", "GRAPHITI_URL",
@@ -234,6 +234,7 @@ func TestConfig_NewConfig_FillsDefaultsForAnEmptyEnvironment(t *testing.T) {
 	assert.Empty(t, config.SmallModelDeniedCommands)
 	assert.Empty(t, config.SmallModelFewshotFile)
 	assert.Equal(t, 3, config.SmallModelFewshotK)
+	assert.Empty(t, config.SmallModelClassifierURL)
 
 	assert.Equal(t, true, config.DuckDuckGoEnabled)
 	assert.Equal(t, "sonar", config.PerplexityModel, "chat/completions names its models bare, so an unset value defaults to the Sonar model")
