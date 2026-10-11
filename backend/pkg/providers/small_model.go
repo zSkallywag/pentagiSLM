@@ -116,6 +116,12 @@ func (fp *flowProvider) compactToolResponse(ctx context.Context, funcName, respo
 			fp.smallModelState().AddFailedTry(key, fmt.Sprintf("%s failed: %s", funcName, firstLine(compacted.Summary)))
 		}
 	}
+
+	// Stamp where the command ran so the model cannot mistake a local sandbox
+	// command (root) for one executed on a remote target.
+	if funcName == tools.TerminalToolName {
+		return smallmodel.AppendExecContext(compacted.Summary)
+	}
 	return compacted.Summary
 }
 

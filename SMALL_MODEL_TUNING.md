@@ -50,6 +50,12 @@ Wired today for container-image selection: when the profile is on and the URL is
 
 It also judges tool-output success/failure: `compactToolResponse` classifies each tool result and, on a high-confidence failure, records a grounded entry in the state's failed attempts, so the state reflects what actually failed rather than the model's narrative. This is an advisory signal, not a hard gate — on its benchmark the classifier and the generative model were equally accurate (and made different mistakes), so the two disagreeing is itself a useful escalation trigger.
 
+## Execution-context stamping
+
+A recurring small-model failure is losing track of where a command ran: it runs a bare command on the local sandbox (root by default), reads the result, and mistakes it for a command run on a remote target. This is general — it applies to any multi-context situation (ssh, docker exec into another container, a database shell, a chroot, multiple hosts), and it is what made an agent fabricate a captured flag from a local file.
+
+The fix makes the execution context an explicit, code-managed fact instead of something the model infers: `compactToolResponse` stamps every terminal result with `smallmodel.ExecContextNote` (`execcontext.go`), telling the model the command ran in the PentAGI sandbox as root and that only ssh/remote wrappers reach a target. A bare `id` returning root is then unmistakably the sandbox, not the target. The deeper form of this — first-class session/target handles and context-aware verification of claimed actions — is the next step.
+
 ## Where the code lives
 
 - `backend/pkg/smallmodel/` — the self-contained logic (budget, state, extraction, tool-output compaction, verifier) with unit tests.
