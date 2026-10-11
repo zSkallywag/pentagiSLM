@@ -56,6 +56,10 @@ A recurring small-model failure is losing track of where a command ran: it runs 
 
 The fix makes the execution context an explicit, code-managed fact instead of something the model infers: `compactToolResponse` stamps every terminal result with `smallmodel.ExecContextNote` (`execcontext.go`), telling the model the command ran in the PentAGI sandbox as root and that only ssh/remote wrappers reach a target. A bare `id` returning root is then unmistakably the sandbox, not the target. The deeper form of this — first-class session/target handles and context-aware verification of claimed actions — is the next step.
 
+## Loop recovery
+
+A small model stuck on a failing approach tends to vary its parameters (different timeouts, wrappers, the same script rewritten) rather than abandon the approach — PentAGI's exact-match repeat detector does not catch this, and invoking the adviser does not help when the adviser is the same small model. `smallmodel.DetectStuck` (`recovery.go`) spots it semantically: when the last few grounded failed attempts are mutually similar (token-set overlap), `smallModelStateBlock` prepends `RecoveryDirective` to the prompt, telling the model to switch to a fundamentally different mechanism or report the blocker instead of retrying. It reuses the success/failure grounding (the failed attempts come from the classifier) and needs no larger model. It does not fix the model's capability, only its tendency to loop; the robust fix for mechanism gaps (e.g. non-interactive ssh auth) is a first-class session tool that handles the mechanism in code.
+
 ## Where the code lives
 
 - `backend/pkg/smallmodel/` — the self-contained logic (budget, state, extraction, tool-output compaction, verifier) with unit tests.

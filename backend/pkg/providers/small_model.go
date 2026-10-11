@@ -165,11 +165,21 @@ func firstLine(s string) string {
 
 // smallModelStateBlock returns the structured-state block to prepend to a
 // prompt, or an empty string when the profile is off or there is nothing yet.
+// When the agent is detected looping on a failing approach, a recovery directive
+// is prepended so it switches mechanism instead of varying a broken one.
 func (fp *flowProvider) smallModelStateBlock(taskID *int64) string {
 	if !fp.smallModelEnabled() || taskID == nil {
 		return ""
 	}
-	return fp.smallModelState().Block(smallmodel.Key{FlowID: fp.flowID, TaskID: *taskID})
+	key := smallmodel.Key{FlowID: fp.flowID, TaskID: *taskID}
+	block := fp.smallModelState().Block(key)
+	if block == "" {
+		return ""
+	}
+	if smallmodel.DetectStuck(fp.smallModelState().FailedTries(key), 4, 0.5) {
+		return smallmodel.RecoveryDirective + "\n\n" + block
+	}
+	return block
 }
 
 // smallModelExamples lazily loads the few-shot example set from the configured

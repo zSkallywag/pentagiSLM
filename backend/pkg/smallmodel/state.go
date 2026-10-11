@@ -112,6 +112,20 @@ func (st *Store) AddFailedTry(k Key, try string) {
 	s.FailedTries = appendUnique(s.FailedTries, []string{try})
 }
 
+// FailedTries returns a copy of the recorded failed attempts for a key, for
+// loop detection. The copy keeps callers from racing the store's mutations.
+func (st *Store) FailedTries(k Key) []string {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	s, ok := st.states[k]
+	if !ok {
+		return nil
+	}
+	out := make([]string, len(s.FailedTries))
+	copy(out, s.FailedTries)
+	return out
+}
+
 // Reset drops the state for a key, used when a task is torn down.
 func (st *Store) Reset(k Key) {
 	st.mu.Lock()
