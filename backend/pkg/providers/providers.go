@@ -320,7 +320,7 @@ func (pc *providerController) NewFlowProvider(
 	imageChosen := false
 	if !policy.skipsModel() && pc.cfg.SmallModelMode && pc.cfg.SmallModelClassifierURL != "" {
 		labels, byLabel := classifierImageLabels(pc.docker.GetDefaultImage(), pc.cfg.DockerDefaultImageForPentest)
-		if label, score, err := smallmodel.NewClassifier(pc.cfg.SmallModelClassifierURL).Choose(ctx, input, labels); err != nil {
+		if label, score, err := smallmodel.NewClassifier(pc.cfg.SmallModelClassifierURL).Choose(ctx, input, labels, ""); err != nil {
 			logrus.WithError(err).Warn("classifier image selection failed, falling back to model")
 		} else if img, ok := byLabel[label]; ok {
 			image = img

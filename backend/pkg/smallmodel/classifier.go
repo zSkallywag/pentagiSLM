@@ -27,8 +27,9 @@ func NewClassifier(url string) *Classifier {
 }
 
 type classifyRequest struct {
-	Text   string   `json:"text"`
-	Labels []string `json:"labels"`
+	Text               string   `json:"text"`
+	Labels             []string `json:"labels"`
+	HypothesisTemplate string   `json:"hypothesis_template,omitempty"`
 }
 
 type classifyResponse struct {
@@ -38,9 +39,10 @@ type classifyResponse struct {
 
 // Choose returns the best label for text among labels, with its confidence. An
 // error means the sidecar was unreachable or replied unusably, and the caller
-// should fall back rather than trust a guess.
-func (c *Classifier) Choose(ctx context.Context, text string, labels []string) (string, float64, error) {
-	payload, err := json.Marshal(classifyRequest{Text: text, Labels: labels})
+// should fall back rather than trust a guess. An empty template lets the sidecar
+// use its default; pass one to shape the hypothesis (e.g. for success/failure).
+func (c *Classifier) Choose(ctx context.Context, text string, labels []string, template string) (string, float64, error) {
+	payload, err := json.Marshal(classifyRequest{Text: text, Labels: labels, HypothesisTemplate: template})
 	if err != nil {
 		return "", 0, err
 	}

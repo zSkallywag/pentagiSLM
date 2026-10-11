@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 	"github.com/vxcontrol/langchaingo/llms"
@@ -96,18 +97,64 @@ func (fp *flowProvider) verifyToolCall(funcName string, funcArgs json.RawMessage
 }
 
 // compactToolResponse pre-processes a raw tool response for a small model: it
-// parses known formats, keeps head and tail of long output, and records the
-// extracted facts in the structured state so they survive summarization.
-func (fp *flowProvider) compactToolResponse(funcName, response string, taskID *int64) string {
+// parses known formats, keeps head and tail of long output, records the
+// extracted facts in the structured state so they survive summarization, and —
+// when a classifier is configured — records a grounded failed attempt so the
+// state carries what actually failed rather than the model's narrative.
+func (fp *flowProvider) compactToolResponse(ctx context.Context, funcName, response string, taskID *int64) string {
 	if !fp.smallModelEnabled() {
 		return response
 	}
 
 	compacted := smallmodel.CompactOutput(funcName, response, fp.cfg.SmallModelToolOutputMaxBytes)
-	if len(compacted.Facts) > 0 && taskID != nil {
-		fp.smallModelState().MergeFacts(smallmodel.Key{FlowID: fp.flowID, TaskID: *taskID}, compacted.Facts)
+	if taskID != nil {
+		key := smallmodel.Key{FlowID: fp.flowID, TaskID: *taskID}
+		if len(compacted.Facts) > 0 {
+			fp.smallModelState().MergeFacts(key, compacted.Facts)
+		}
+		if outcome, score, ok := fp.smallModelJudgeOutcome(ctx, compacted.Summary); ok && outcome == "failure" && score >= 0.7 {
+			fp.smallModelState().AddFailedTry(key, fmt.Sprintf("%s failed: %s", funcName, firstLine(compacted.Summary)))
+		}
 	}
 	return compacted.Summary
+}
+
+// smallModelClassifier returns the lazily-built decision-sidecar client.
+func (fp *flowProvider) smallModelClassifier() *smallmodel.Classifier {
+	fp.mx.Lock()
+	defer fp.mx.Unlock()
+	if fp.smClassifier == nil {
+		fp.smClassifier = smallmodel.NewClassifier(fp.cfg.SmallModelClassifierURL)
+	}
+	return fp.smClassifier
+}
+
+// smallModelJudgeOutcome classifies a tool output as "success" or "failure" with
+// a confidence. ok is false when classification is disabled or the sidecar did
+// not answer, so the caller never records an ungrounded verdict.
+func (fp *flowProvider) smallModelJudgeOutcome(ctx context.Context, output string) (string, float64, bool) {
+	if !fp.smallModelEnabled() || fp.cfg.SmallModelClassifierURL == "" || strings.TrimSpace(output) == "" {
+		return "", 0, false
+	}
+	label, score, err := fp.smallModelClassifier().Choose(
+		ctx, output, []string{"success", "failure"}, "This command output indicates a {}.",
+	)
+	if err != nil {
+		return "", 0, false
+	}
+	return label, score, true
+}
+
+// firstLine returns the first line of s, trimmed and capped, for a compact state note.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	if len(s) > 120 {
+		s = s[:120]
+	}
+	return s
 }
 
 // smallModelStateBlock returns the structured-state block to prepend to a

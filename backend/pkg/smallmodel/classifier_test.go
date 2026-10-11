@@ -17,7 +17,7 @@ func TestClassifier_Choose_ReturnsTopLabelAndScore(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	label, score, err := NewClassifier(srv.URL).Choose(t.Context(), "compile a go binary", []string{"go programming", "python programming"})
+	label, score, err := NewClassifier(srv.URL).Choose(t.Context(), "compile a go binary", []string{"go programming", "python programming"}, "")
 	require.NoError(t, err)
 	assert.Equal(t, "go programming", label)
 	assert.InDelta(t, 0.91, score, 0.0001)
@@ -29,7 +29,7 @@ func TestClassifier_Choose_ErrorsOnNon200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := NewClassifier(srv.URL).Choose(t.Context(), "x", []string{"a", "b"})
+	_, _, err := NewClassifier(srv.URL).Choose(t.Context(), "x", []string{"a", "b"}, "")
 	assert.Error(t, err)
 }
 
@@ -39,11 +39,11 @@ func TestClassifier_Choose_ErrorsOnEmptyLabel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := NewClassifier(srv.URL).Choose(t.Context(), "x", []string{"a"})
+	_, _, err := NewClassifier(srv.URL).Choose(t.Context(), "x", []string{"a"}, "")
 	assert.Error(t, err)
 }
 
 func TestClassifier_Choose_ErrorsWhenUnreachable(t *testing.T) {
-	_, _, err := NewClassifier("http://127.0.0.1:0").Choose(t.Context(), "x", []string{"a"})
+	_, _, err := NewClassifier("http://127.0.0.1:0").Choose(t.Context(), "x", []string{"a"}, "")
 	assert.Error(t, err)
 }

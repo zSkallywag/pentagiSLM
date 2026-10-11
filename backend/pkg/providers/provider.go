@@ -173,6 +173,7 @@ type flowProvider struct {
 	smState        *smallmodel.Store
 	smFewshot      *smallmodel.ExampleSet
 	smFewshotTried bool
+	smClassifier   *smallmodel.Classifier
 
 	provider.Provider
 }

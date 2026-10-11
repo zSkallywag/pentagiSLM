@@ -416,7 +416,7 @@ func (fp *flowProvider) execToolCall(
 		}
 	}
 
-	response = fp.compactToolResponse(funcName, response, taskID)
+	response = fp.compactToolResponse(ctx, funcName, response, taskID)
 
 	if monitor.shouldInvokeMentor(toolCall) && executor.IsFunctionExists(tools.AdviceToolName) {
 		logger.WithFields(logrus.Fields{

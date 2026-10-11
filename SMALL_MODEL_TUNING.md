@@ -48,6 +48,8 @@ Some decisions in the pipeline are closed-set classifications, not generation �
 
 Wired today for container-image selection: when the profile is on and the URL is set, `NewFlowProvider` asks the classifier to choose the image from a labelled candidate set instead of calling the generative model, and falls back to the model if the classifier is unreachable. A reference sidecar (a DeBERTa-v3 zero-shot model behind FastAPI) and the image-selection benchmark live in `small-model-eval/classifier-sidecar/`. On that benchmark the classifier matched the generative model's accuracy while running on CPU, ~2× faster and deterministically.
 
+It also judges tool-output success/failure: `compactToolResponse` classifies each tool result and, on a high-confidence failure, records a grounded entry in the state's failed attempts, so the state reflects what actually failed rather than the model's narrative. This is an advisory signal, not a hard gate — on its benchmark the classifier and the generative model were equally accurate (and made different mistakes), so the two disagreeing is itself a useful escalation trigger.
+
 ## Where the code lives
 
 - `backend/pkg/smallmodel/` — the self-contained logic (budget, state, extraction, tool-output compaction, verifier) with unit tests.
