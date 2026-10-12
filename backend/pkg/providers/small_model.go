@@ -112,6 +112,15 @@ func (fp *flowProvider) compactToolResponse(ctx context.Context, funcName, respo
 		if len(compacted.Facts) > 0 {
 			fp.smallModelState().MergeFacts(key, compacted.Facts)
 		}
+		// Detect on the raw output: a "command not found" line is short and
+		// never truncated, but compaction could drop it from a large output, and
+		// losing this signal is exactly what makes a small model loop on an
+		// absent tool instead of installing it.
+		if funcName == tools.TerminalToolName {
+			for _, name := range smallmodel.DetectMissingTools(response) {
+				fp.smallModelState().AddFacts(key, smallmodel.MissingToolFact(name))
+			}
+		}
 		if outcome, score, ok := fp.smallModelJudgeOutcome(ctx, compacted.Summary); ok && outcome == "failure" && score >= 0.7 {
 			fp.smallModelState().AddFailedTry(key, fmt.Sprintf("%s failed: %s", funcName, firstLine(compacted.Summary)))
 		}

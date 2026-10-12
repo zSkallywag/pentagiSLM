@@ -34,17 +34,26 @@ func CompactOutput(toolName, raw string, maxBytes int) Compacted {
 }
 
 // headTail keeps the first and last portions of s within budget, joined by a
-// marker that names how many bytes were dropped.
+// marker that names how many bytes were dropped. The marker space is reserved
+// at the omitted count's widest (the digit count of len(s)), so the real marker
+// is never longer than reserved and the result never exceeds budget.
 func headTail(s string, budget int) string {
-	const marker = "\n... [%d bytes omitted] ...\n"
-	if budget <= len(marker)+16 {
+	const tmpl = "\n... [%d bytes omitted] ...\n"
+	maxMarker := len(fmt.Sprintf(tmpl, len(s)))
+	if budget <= maxMarker {
+		if budget <= 0 {
+			return ""
+		}
+		if budget > len(s) {
+			return s
+		}
 		return s[:budget]
 	}
-	room := budget - len(marker)
+	room := budget - maxMarker
 	head := room * 6 / 10
 	tail := room - head
 	omitted := len(s) - head - tail
-	return s[:head] + fmt.Sprintf(marker, omitted) + s[len(s)-tail:]
+	return s[:head] + fmt.Sprintf(tmpl, omitted) + s[len(s)-tail:]
 }
 
 type nmapRun struct {
