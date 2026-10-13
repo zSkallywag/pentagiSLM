@@ -13,7 +13,15 @@ var (
 	reIPv4 = regexp.MustCompile(`\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b`)
 	// reService matches an nmap-style line "80/tcp open http Apache httpd 2.4.41".
 	reService = regexp.MustCompile(`(?m)^(\d{1,5})/(tcp|udp)\s+open\s+(\S+)(?:\s+(.*))?$`)
+	// reCredPair recognises an explicitly-labelled user:pass pair ("credentials:
+	// student:Secret", "valid login: admin:admin"). Keyword-anchored to avoid
+	// turning any "word:word" (a URL, a timestamp) into a false credential.
+	reCredPair = regexp.MustCompile(`(?i)\b(?:credential|login|account)s?\s*[:=]\s*([A-Za-z0-9._\-]{1,64}:[^\s"']{2,64})`)
 )
+
+// CredentialFactPrefix labels a fact that carries a usable credential, so the
+// strategy gate can find it without re-parsing free text.
+const CredentialFactPrefix = "credential seen: "
 
 // Facts extracts structured, high-value facts from free text (typically tool
 // output) using regexes only — no model call, no cost, no drift. The result is
@@ -45,6 +53,10 @@ func Facts(text string) []string {
 
 	for _, ip := range reIPv4.FindAllString(text, -1) {
 		set["host seen: "+ip] = struct{}{}
+	}
+
+	for _, m := range reCredPair.FindAllStringSubmatch(text, -1) {
+		set[CredentialFactPrefix+m[1]] = struct{}{}
 	}
 
 	return toSortedSlice(set)

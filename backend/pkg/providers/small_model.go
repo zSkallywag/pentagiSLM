@@ -67,8 +67,10 @@ func (fp *flowProvider) sanitizeToolArgs(funcArgs json.RawMessage) json.RawMessa
 // verifyToolCall classifies a proposed tool call before execution. When the call
 // is not allowed it returns a tool response to feed back to the model and blocked
 // set, so the caller skips execution and keeps the agent inside the authorized
-// scope. It only inspects commands today; other tools pass through.
-func (fp *flowProvider) verifyToolCall(funcName string, funcArgs json.RawMessage) (string, bool) {
+// scope. It applies two guards to commands: the scope/destructive verifier, and
+// the strategy gate that holds back a premature wordlist brute-force. Other tools
+// pass through.
+func (fp *flowProvider) verifyToolCall(funcName string, funcArgs json.RawMessage, taskID *int64) (string, bool) {
 	if !fp.smallModelEnabled() || !fp.cfg.SmallModelVerifierEnabled {
 		return "", false
 	}
@@ -83,17 +85,28 @@ func (fp *flowProvider) verifyToolCall(funcName string, funcArgs json.RawMessage
 		return "", false
 	}
 
-	verdict := fp.smallModelVerifier().CheckCommand(action.Input)
-	if verdict.Decision == smallmodel.Allow {
-		return "", false
+	if verdict := fp.smallModelVerifier().CheckCommand(action.Input); verdict.Decision != smallmodel.Allow {
+		return fmt.Sprintf(
+			"BLOCKED by pre-execution verifier: %s. The command was not run. "+
+				"If this is in scope and intended, it needs explicit operator confirmation; "+
+				"otherwise choose an in-scope, non-destructive action.",
+			verdict.Reason,
+		), true
 	}
 
-	return fmt.Sprintf(
-		"BLOCKED by pre-execution verifier: %s. The command was not run. "+
-			"If this is in scope and intended, it needs explicit operator confirmation; "+
-			"otherwise choose an in-scope, non-destructive action.",
-		verdict.Reason,
-	), true
+	// Hold back a premature wordlist brute-force once per task, replaying the
+	// facts so the agent uses a known credential or finishes enumeration first.
+	if taskID != nil {
+		key := smallmodel.Key{FlowID: fp.flowID, TaskID: *taskID}
+		if !fp.smallModelState().StrategyGateFired(key) {
+			if gated, msg := smallmodel.StrategyGate(action.Input, fp.smallModelState().Facts(key)); gated {
+				fp.smallModelState().MarkStrategyGateFired(key)
+				return msg, true
+			}
+		}
+	}
+
+	return "", false
 }
 
 // compactToolResponse pre-processes a raw tool response for a small model: it

@@ -41,6 +41,22 @@ func TestFacts_DoesNotDoubleCountPortWithBanner(t *testing.T) {
 	assert.Equal(t, 1, count)
 }
 
+func TestFacts_ExtractsLabelledCredentialPair(t *testing.T) {
+	facts := Facts("found valid credentials: student:Secret on the host")
+	assert.Contains(t, facts, CredentialFactPrefix+"student:Secret")
+}
+
+func TestFacts_DoesNotTreatUnlabelledColonPairAsCredential(t *testing.T) {
+	// A bare "word:word" (a URL, a ratio, a timestamp) must not become a
+	// credential; only a keyword-anchored pair does.
+	facts := Facts("connecting to http://host:8080 at 12:30:00")
+	for _, f := range facts {
+		if len(f) >= len(CredentialFactPrefix) && f[:len(CredentialFactPrefix)] == CredentialFactPrefix {
+			t.Fatalf("unexpected credential fact from unlabelled text: %q", f)
+		}
+	}
+}
+
 func TestFacts_EmptyInputYieldsNoFacts(t *testing.T) {
 	assert.Empty(t, Facts(""))
 }

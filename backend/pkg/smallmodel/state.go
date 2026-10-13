@@ -54,13 +54,17 @@ type Key struct {
 // Store holds per-task state and is safe for concurrent use: tool handlers on
 // different workers update it while the agent loop reads it.
 type Store struct {
-	mu     sync.RWMutex
-	states map[Key]*State
+	mu        sync.RWMutex
+	states    map[Key]*State
+	gateFired map[Key]struct{}
 }
 
 // NewStore returns an empty Store.
 func NewStore() *Store {
-	return &Store{states: make(map[Key]*State)}
+	return &Store{
+		states:    make(map[Key]*State),
+		gateFired: make(map[Key]struct{}),
+	}
 }
 
 func (st *Store) stateLocked(k Key) *State {
@@ -126,11 +130,42 @@ func (st *Store) FailedTries(k Key) []string {
 	return out
 }
 
+// Facts returns a copy of the established facts for a key, for the strategy gate.
+func (st *Store) Facts(k Key) []string {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	s, ok := st.states[k]
+	if !ok {
+		return nil
+	}
+	out := make([]string, len(s.Facts))
+	copy(out, s.Facts)
+	return out
+}
+
+// MarkStrategyGateFired records that the strategy gate has already prompted this
+// task once, so the agent is asked to reconsider a wordlist brute-force a single
+// time and then trusted — the gate never blocks the same task twice.
+func (st *Store) MarkStrategyGateFired(k Key) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.gateFired[k] = struct{}{}
+}
+
+// StrategyGateFired reports whether the gate has already fired for this task.
+func (st *Store) StrategyGateFired(k Key) bool {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	_, ok := st.gateFired[k]
+	return ok
+}
+
 // Reset drops the state for a key, used when a task is torn down.
 func (st *Store) Reset(k Key) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	delete(st.states, k)
+	delete(st.gateFired, k)
 }
 
 func appendUnique(existing, incoming []string) []string {
