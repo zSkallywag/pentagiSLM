@@ -1,6 +1,9 @@
 package smallmodel
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDetectStuck_FlagsRepeatedSimilarFailures(t *testing.T) {
 	tries := []string{
@@ -86,5 +89,19 @@ func TestDetectStuckByRepetition_DoesNotFireOnVariedCommands(t *testing.T) {
 	recent := []string{"nmap -sV N.N.N.N", "curl http://N.N.N.N", "ls -la /work/*", "cat /work/*.txt", "whoami"}
 	if _, stuck := DetectStuckByRepetition(recent, 10, 8, 3, 6); stuck {
 		t.Fatal("genuinely different commands must not be flagged, even with no progress")
+	}
+}
+
+func TestRecoveryDirectives_NameTheGestureAndEscalate(t *testing.T) {
+	g := "python3 /work/*.py"
+	if !strings.Contains(RepetitionRecoveryDirective(g), g) {
+		t.Error("soft directive must name the gesture")
+	}
+	esc := EscalatedRecoveryDirective(g)
+	if !strings.Contains(esc, g) || !strings.Contains(esc, "DISABLED") {
+		t.Errorf("escalated directive must name the gesture and state it is disabled, got %q", esc)
+	}
+	if !strings.Contains(BlockedGestureMessage(g), g) {
+		t.Error("blocked-gesture message must name the gesture")
 	}
 }

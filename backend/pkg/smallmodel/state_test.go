@@ -82,6 +82,24 @@ func TestStore_AddFacts_ResetsProgressOnlyForNewFacts(t *testing.T) {
 	assert.Equal(t, 1, since, "a duplicate fact is not progress and does not reset")
 }
 
+func TestStore_NoteRecoveryArmed_CountsConsecutiveSameGesture(t *testing.T) {
+	st := NewStore()
+	k := Key{FlowID: 1, TaskID: 1}
+	assert.Equal(t, 1, st.NoteRecoveryArmed(k, "grep /work/*.log"))
+	assert.Equal(t, 2, st.NoteRecoveryArmed(k, "grep /work/*.log"))
+	assert.Equal(t, 3, st.NoteRecoveryArmed(k, "grep /work/*.log"))
+	assert.Equal(t, 1, st.NoteRecoveryArmed(k, "ls /work/*"), "a different gesture resets the count")
+}
+
+func TestStore_BlockGesture_RejectsOnlyTheBlockedGesture(t *testing.T) {
+	st := NewStore()
+	k := Key{FlowID: 1, TaskID: 1}
+	st.BlockGesture(k, "python3 /work/*.py")
+	assert.True(t, st.IsGestureBlocked(k, "python3 /work/*.py"))
+	assert.False(t, st.IsGestureBlocked(k, "nmap -sV N.N.N.N"))
+	assert.False(t, st.IsGestureBlocked(Key{FlowID: 1, TaskID: 2}, "python3 /work/*.py"), "block is per-task")
+}
+
 func TestStore_ConcurrentWritesAreSafe(t *testing.T) {
 	st := NewStore()
 	k := Key{FlowID: 1, TaskID: 1}

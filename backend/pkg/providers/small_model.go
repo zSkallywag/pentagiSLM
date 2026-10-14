@@ -14,6 +14,11 @@ import (
 	"pentagi/pkg/tools"
 )
 
+// smallModelRecoveryEscalateAfter is how many turns in a row the repetition
+// recovery directive may fire on the same gesture before the gesture is disabled
+// and the wording escalated — i.e. how many times the model may ignore the nudge.
+const smallModelRecoveryEscalateAfter = 3
+
 // smallModelEnabled reports whether the small-model profile is active.
 func (fp *flowProvider) smallModelEnabled() bool {
 	return fp.cfg != nil && fp.cfg.SmallModelMode
@@ -98,6 +103,15 @@ func (fp *flowProvider) verifyToolCall(funcName string, funcArgs json.RawMessage
 	// facts so the agent uses a known credential or finishes enumeration first.
 	if taskID != nil {
 		key := smallmodel.Key{FlowID: fp.flowID, TaskID: *taskID}
+		// A gesture disabled by the recovery escalation is rejected before it
+		// runs, so an ignored loop cannot continue.
+		canon := smallmodel.CanonicalizeCommand(action.Input)
+		if fp.smallModelState().IsGestureBlocked(key, canon) {
+			logrus.WithFields(logrus.Fields{
+				"flow": fp.flowID, "task": *taskID, "guard": "blocked_gesture", "gesture": canon,
+			}).Warn("small-model guard rejected a disabled gesture")
+			return smallmodel.BlockedGestureMessage(canon), true
+		}
 		if !fp.smallModelState().StrategyGateFired(key) {
 			if gated, msg := smallmodel.StrategyGate(action.Input, fp.smallModelState().Facts(key)); gated {
 				fp.smallModelState().MarkStrategyGateFired(key)
@@ -214,9 +228,18 @@ func (fp *flowProvider) smallModelStateBlock(taskID *int64) string {
 	// caught deterministically without the classifier.
 	recent, sinceProgress := fp.smallModelState().RepetitionState(key)
 	if canon, stuck := smallmodel.DetectStuckByRepetition(recent, sinceProgress, 8, 3, 6); stuck {
+		count := fp.smallModelState().NoteRecoveryArmed(key, canon)
 		logrus.WithFields(logrus.Fields{
-			"flow": fp.flowID, "task": *taskID, "trigger": "repetition", "gesture": canon,
+			"flow": fp.flowID, "task": *taskID, "trigger": "repetition", "gesture": canon, "ignored": count - 1,
 		}).Warn("small-model recovery directive armed")
+		// The soft nudge was ignored this many turns in a row: disable the
+		// gesture outright so the pre-execution guard rejects it, and escalate
+		// the wording. The execution monitor (on under the profile) hands the
+		// hard case to the adviser in parallel.
+		if count >= smallModelRecoveryEscalateAfter {
+			fp.smallModelState().BlockGesture(key, canon)
+			return smallmodel.EscalatedRecoveryDirective(canon) + "\n\n" + block
+		}
 		return smallmodel.RepetitionRecoveryDirective(canon) + "\n\n" + block
 	}
 	return block

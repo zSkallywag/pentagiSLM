@@ -22,6 +22,28 @@ func RepetitionRecoveryDirective(canonical string) string {
 	)
 }
 
+// EscalatedRecoveryDirective is used once the soft directive has been ignored
+// repeatedly: it states the action is now disabled and the agent must change
+// approach, delegate, or stop.
+func EscalatedRecoveryDirective(canonical string) string {
+	return fmt.Sprintf(
+		"RECOVERY ALERT (escalated): the warning was ignored — %s keeps being repeated with no progress, so it is now "+
+			"DISABLED for this task and will be rejected. You must take a fundamentally different approach, delegate the "+
+			"problem to the adviser, or report the blocker and stop.",
+		canonical,
+	)
+}
+
+// BlockedGestureMessage is the tool response returned when a disabled gesture is
+// attempted again, so the agent sees the rejection in place of the output.
+func BlockedGestureMessage(canonical string) string {
+	return fmt.Sprintf(
+		"BLOCKED: the action %q is disabled for this subtask — it was repeated without progress and the recovery "+
+			"warning was ignored. It was not run. Do something fundamentally different, or report the blocker and stop.",
+		canonical,
+	)
+}
+
 var (
 	reCanonANSI = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	// RE2 has no backreferences, so the closing delimiter cannot be matched; a

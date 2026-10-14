@@ -22,6 +22,14 @@ type State struct {
 	// cmdsSinceProgress counts commands run since the last new fact was learned.
 	recentCanon       []string
 	cmdsSinceProgress int
+
+	// Recovery escalation: armedGesture/armedCount track how many turns in a row
+	// the recovery directive has fired on the same gesture (the model ignoring
+	// it), and blockedGestures are canonical gestures disabled after that count
+	// crossed the escalation threshold.
+	armedGesture    string
+	armedCount      int
+	blockedGestures map[string]struct{}
 }
 
 // recentCanonCap bounds the ring of canonical commands kept for loop detection.
@@ -137,6 +145,47 @@ func (st *Store) RecordCommand(k Key, canonical string) {
 		s.recentCanon = s.recentCanon[len(s.recentCanon)-recentCanonCap:]
 	}
 	s.cmdsSinceProgress++
+}
+
+// NoteRecoveryArmed records that the recovery directive fired on a gesture this
+// turn and returns how many turns in a row it has fired on that same gesture —
+// a rising count means the model keeps ignoring it. A different gesture resets
+// the count to 1.
+func (st *Store) NoteRecoveryArmed(k Key, gesture string) int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	s := st.stateLocked(k)
+	if s.armedGesture == gesture {
+		s.armedCount++
+	} else {
+		s.armedGesture = gesture
+		s.armedCount = 1
+	}
+	return s.armedCount
+}
+
+// BlockGesture disables a canonical gesture for a task, so the pre-execution
+// guard rejects it instead of running it.
+func (st *Store) BlockGesture(k Key, gesture string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	s := st.stateLocked(k)
+	if s.blockedGestures == nil {
+		s.blockedGestures = make(map[string]struct{})
+	}
+	s.blockedGestures[gesture] = struct{}{}
+}
+
+// IsGestureBlocked reports whether a canonical gesture is disabled for a task.
+func (st *Store) IsGestureBlocked(k Key, gesture string) bool {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	s, ok := st.states[k]
+	if !ok {
+		return false
+	}
+	_, blocked := s.blockedGestures[gesture]
+	return blocked
 }
 
 // RepetitionState returns a copy of the recent canonical commands and the number
