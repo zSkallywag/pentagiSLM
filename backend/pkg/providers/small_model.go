@@ -198,10 +198,36 @@ func (fp *flowProvider) smallModelStateBlock(taskID *int64) string {
 	if block == "" {
 		return ""
 	}
+	// Trigger 1: recent grounded failures that resemble each other — a loop of
+	// failing attempts, caught through the success/failure classifier.
 	if smallmodel.DetectStuck(fp.smallModelState().FailedTries(key), 4, 0.5) {
 		return smallmodel.RecoveryDirective + "\n\n" + block
 	}
+	// Trigger 2: one canonical action repeated while no new fact is learned — a
+	// loop of any kind (brute-force grind, log re-reading, script rewriting),
+	// caught deterministically without the classifier.
+	recent, sinceProgress := fp.smallModelState().RepetitionState(key)
+	if canon, stuck := smallmodel.DetectStuckByRepetition(recent, sinceProgress, 8, 3, 6); stuck {
+		return smallmodel.RepetitionRecoveryDirective(canon) + "\n\n" + block
+	}
 	return block
+}
+
+// recordTerminalCommand files a terminal command's canonical form into the
+// per-task loop-detection ring before it executes, so DetectStuckByRepetition
+// can see a repeated gesture on the next turn.
+func (fp *flowProvider) recordTerminalCommand(funcName string, funcArgs json.RawMessage, taskID *int64) {
+	if !fp.smallModelEnabled() || taskID == nil || funcName != tools.TerminalToolName {
+		return
+	}
+	var action struct {
+		Input string `json:"input"`
+	}
+	if err := json.Unmarshal(funcArgs, &action); err != nil || action.Input == "" {
+		return
+	}
+	key := smallmodel.Key{FlowID: fp.flowID, TaskID: *taskID}
+	fp.smallModelState().RecordCommand(key, smallmodel.CanonicalizeCommand(action.Input))
 }
 
 // smallModelExamples lazily loads the few-shot example set from the configured

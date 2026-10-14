@@ -16,7 +16,16 @@ type State struct {
 	Facts       []string
 	FailedTries []string
 	NextStep    string
+
+	// Loop-detection bookkeeping, never serialized into the prompt block:
+	// recentCanon is a ring of the last canonical commands, and
+	// cmdsSinceProgress counts commands run since the last new fact was learned.
+	recentCanon       []string
+	cmdsSinceProgress int
 }
+
+// recentCanonCap bounds the ring of canonical commands kept for loop detection.
+const recentCanonCap = 16
 
 // ToBlock serializes the state into the fixed block that heads the prompt. The
 // labels are stable so a small model learns the shape; an empty state yields an
@@ -100,12 +109,48 @@ func (st *Store) SetNextStep(k Key, next string) {
 	st.stateLocked(k).NextStep = strings.TrimSpace(next)
 }
 
-// AddFacts appends facts, de-duplicating against what is already recorded.
-func (st *Store) AddFacts(k Key, facts ...string) {
+// AddFacts appends facts, de-duplicating against what is already recorded, and
+// returns how many were genuinely new. A new fact is progress, so it resets the
+// no-progress counter the loop detector reads.
+func (st *Store) AddFacts(k Key, facts ...string) int {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	s := st.stateLocked(k)
+	before := len(s.Facts)
 	s.Facts = appendUnique(s.Facts, facts)
+	added := len(s.Facts) - before
+	if added > 0 {
+		s.cmdsSinceProgress = 0
+	}
+	return added
+}
+
+// RecordCommand appends a canonical command to the per-task ring and counts it as
+// one more command since the last progress. Called before each terminal command
+// that passed the pre-execution guards.
+func (st *Store) RecordCommand(k Key, canonical string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	s := st.stateLocked(k)
+	s.recentCanon = append(s.recentCanon, canonical)
+	if len(s.recentCanon) > recentCanonCap {
+		s.recentCanon = s.recentCanon[len(s.recentCanon)-recentCanonCap:]
+	}
+	s.cmdsSinceProgress++
+}
+
+// RepetitionState returns a copy of the recent canonical commands and the number
+// of commands run since the last new fact, for DetectStuckByRepetition.
+func (st *Store) RepetitionState(k Key) (recent []string, cmdsSinceProgress int) {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	s, ok := st.states[k]
+	if !ok {
+		return nil, 0
+	}
+	recent = make([]string, len(s.recentCanon))
+	copy(recent, s.recentCanon)
+	return recent, s.cmdsSinceProgress
 }
 
 // AddFailedTry records a failed attempt, de-duplicating.

@@ -53,6 +53,35 @@ func TestStore_Reset_DropsState(t *testing.T) {
 	assert.Equal(t, "", st.Block(k))
 }
 
+func TestStore_RecordCommand_CountsCommandsAndKeepsRing(t *testing.T) {
+	st := NewStore()
+	k := Key{FlowID: 1, TaskID: 1}
+	for i := 0; i < recentCanonCap+5; i++ {
+		st.RecordCommand(k, "python3 /work/*.py")
+	}
+	recent, since := st.RepetitionState(k)
+	assert.Len(t, recent, recentCanonCap, "ring is capped")
+	assert.Equal(t, recentCanonCap+5, since, "every command counts since no fact was added")
+}
+
+func TestStore_AddFacts_ResetsProgressOnlyForNewFacts(t *testing.T) {
+	st := NewStore()
+	k := Key{FlowID: 1, TaskID: 1}
+	st.RecordCommand(k, "a")
+	st.RecordCommand(k, "a")
+
+	added := st.AddFacts(k, "22/tcp open: ssh")
+	assert.Equal(t, 1, added)
+	_, since := st.RepetitionState(k)
+	assert.Equal(t, 0, since, "a new fact is progress and resets the counter")
+
+	st.RecordCommand(k, "a")
+	again := st.AddFacts(k, "22/tcp open: ssh") // duplicate, not new
+	assert.Equal(t, 0, again)
+	_, since = st.RepetitionState(k)
+	assert.Equal(t, 1, since, "a duplicate fact is not progress and does not reset")
+}
+
 func TestStore_ConcurrentWritesAreSafe(t *testing.T) {
 	st := NewStore()
 	k := Key{FlowID: 1, TaskID: 1}

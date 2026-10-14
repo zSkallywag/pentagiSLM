@@ -369,6 +369,8 @@ func (fp *flowProvider) execToolCall(
 		return blockedResponse, nil
 	}
 
+	fp.recordTerminalCommand(funcName, funcArgs, taskID)
+
 	var (
 		err      error
 		response string
