@@ -409,8 +409,14 @@ func applySmallModelProfile(config *Config) {
 		return
 	}
 
+	// An operator who has not chosen a value leaves it blank — and docker-compose
+	// passes an unset variable as an empty string (`${VAR:-}`), which
+	// os.LookupEnv still reports as present. So "unspecified" means empty or
+	// absent, not absent: checking only LookupEnv would silently drop the whole
+	// profile in a compose deployment.
+	unspecified := func(envName string) bool { return os.Getenv(envName) == "" }
 	lowerIfUnset := func(envName string, field *int, small int) {
-		if _, set := os.LookupEnv(envName); !set {
+		if unspecified(envName) {
 			*field = small
 		}
 	}
@@ -423,11 +429,25 @@ func applySmallModelProfile(config *Config) {
 	// Escalate hard cases to the (operator-configured, typically larger) adviser
 	// agent sooner by enabling and tightening the execution monitor when the
 	// operator has not configured it.
-	if _, set := os.LookupEnv("EXECUTION_MONITOR_ENABLED"); !set {
+	if unspecified("EXECUTION_MONITOR_ENABLED") {
 		config.ExecutionMonitorEnabled = true
 	}
 	lowerIfUnset("EXECUTION_MONITOR_SAME_TOOL_LIMIT", &config.ExecutionMonitorSameToolLimit, 3)
 	lowerIfUnset("EXECUTION_MONITOR_TOTAL_TOOL_LIMIT", &config.ExecutionMonitorTotalToolLimit, 8)
+
+	// The pre-execution guards (scope/destructive verifier plus the strategy
+	// gate) are part of the small-model floor: on unless the operator explicitly
+	// turned them off with a non-empty "false".
+	if unspecified("SMALL_MODEL_VERIFIER_ENABLED") {
+		config.SmallModelVerifierEnabled = true
+	}
+
+	logrus.WithFields(logrus.Fields{
+		"verifier_enabled": config.SmallModelVerifierEnabled,
+		"classifier_url":   config.SmallModelClassifierURL,
+		"ctx_window":       config.SmallModelCtxWindow,
+		"scope":            config.SmallModelScope,
+	}).Info("small-model profile active")
 }
 
 func ensureInstallationID(config *Config) {

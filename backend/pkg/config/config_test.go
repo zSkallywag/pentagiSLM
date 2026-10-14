@@ -497,6 +497,30 @@ func TestConfig_NewConfig_SmallModelModeKeepsExplicitExecutionMonitor(t *testing
 	assert.False(t, config.ExecutionMonitorEnabled, "an explicit monitor setting must survive the profile")
 }
 
+func TestConfig_NewConfig_SmallModelModeEnablesVerifierWhenBlank(t *testing.T) {
+	clearConfigEnv(t)
+	t.Chdir(t.TempDir())
+	t.Setenv("SMALL_MODEL_MODE", "true")
+	t.Setenv("SMALL_MODEL_VERIFIER_ENABLED", "") // compose passes it blank when unset
+
+	config, err := NewConfig()
+	require.NoError(t, err)
+
+	assert.True(t, config.SmallModelVerifierEnabled, "a blank flag must default the guards on in small-model mode")
+}
+
+func TestConfig_NewConfig_SmallModelModeKeepsExplicitVerifierOff(t *testing.T) {
+	clearConfigEnv(t)
+	t.Chdir(t.TempDir())
+	t.Setenv("SMALL_MODEL_MODE", "true")
+	t.Setenv("SMALL_MODEL_VERIFIER_ENABLED", "false")
+
+	config, err := NewConfig()
+	require.NoError(t, err)
+
+	assert.False(t, config.SmallModelVerifierEnabled, "an explicit false must survive the profile")
+}
+
 func TestConfig_NewConfig_SmallModelModeKeepsExplicitSummarizerThresholds(t *testing.T) {
 	clearConfigEnv(t)
 	t.Chdir(t.TempDir())

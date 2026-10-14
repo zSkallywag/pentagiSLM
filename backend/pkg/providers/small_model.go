@@ -101,6 +101,9 @@ func (fp *flowProvider) verifyToolCall(funcName string, funcArgs json.RawMessage
 		if !fp.smallModelState().StrategyGateFired(key) {
 			if gated, msg := smallmodel.StrategyGate(action.Input, fp.smallModelState().Facts(key)); gated {
 				fp.smallModelState().MarkStrategyGateFired(key)
+				logrus.WithFields(logrus.Fields{
+					"flow": fp.flowID, "task": *taskID, "guard": "strategy_gate",
+				}).Warn("small-model guard held back a premature wordlist brute-force")
 				return msg, true
 			}
 		}
@@ -201,6 +204,9 @@ func (fp *flowProvider) smallModelStateBlock(taskID *int64) string {
 	// Trigger 1: recent grounded failures that resemble each other — a loop of
 	// failing attempts, caught through the success/failure classifier.
 	if smallmodel.DetectStuck(fp.smallModelState().FailedTries(key), 4, 0.5) {
+		logrus.WithFields(logrus.Fields{
+			"flow": fp.flowID, "task": *taskID, "trigger": "failure_similarity",
+		}).Warn("small-model recovery directive armed")
 		return smallmodel.RecoveryDirective + "\n\n" + block
 	}
 	// Trigger 2: one canonical action repeated while no new fact is learned — a
@@ -208,6 +214,9 @@ func (fp *flowProvider) smallModelStateBlock(taskID *int64) string {
 	// caught deterministically without the classifier.
 	recent, sinceProgress := fp.smallModelState().RepetitionState(key)
 	if canon, stuck := smallmodel.DetectStuckByRepetition(recent, sinceProgress, 8, 3, 6); stuck {
+		logrus.WithFields(logrus.Fields{
+			"flow": fp.flowID, "task": *taskID, "trigger": "repetition", "gesture": canon,
+		}).Warn("small-model recovery directive armed")
 		return smallmodel.RepetitionRecoveryDirective(canon) + "\n\n" + block
 	}
 	return block
