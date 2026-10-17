@@ -100,6 +100,15 @@ func TestStore_BlockGesture_RejectsOnlyTheBlockedGesture(t *testing.T) {
 	assert.False(t, st.IsGestureBlocked(Key{FlowID: 1, TaskID: 2}, "python3 /work/*.py"), "block is per-task")
 }
 
+func TestStore_SubtaskCommands_CountsPerSubtask(t *testing.T) {
+	st := NewStore()
+	assert.Equal(t, 0, st.SubtaskCommands(7))
+	assert.Equal(t, 1, st.IncrSubtaskCommands(7))
+	assert.Equal(t, 2, st.IncrSubtaskCommands(7))
+	assert.Equal(t, 1, st.IncrSubtaskCommands(8), "a different subtask counts separately")
+	assert.Equal(t, 2, st.SubtaskCommands(7))
+}
+
 func TestStore_ConcurrentWritesAreSafe(t *testing.T) {
 	st := NewStore()
 	k := Key{FlowID: 1, TaskID: 1}

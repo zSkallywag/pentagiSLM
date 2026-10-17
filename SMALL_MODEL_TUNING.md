@@ -82,6 +82,10 @@ The loop recovery above is a *cure* — it escapes a dead end once the agent is 
 
 The credential precondition is fed by a deterministic, keyword-anchored extractor in `Facts` (`extract.go`): a labelled `user:pass` pair found in tool output becomes a `credential seen:` fact. A credential *given in the task description* only gates once it is likewise present in the state, so feeding task-context credentials into the state is the natural follow-up that makes the gate bite on the exact flow that motivated it.
 
+## Per-subtask command budget
+
+Loop detection and escalation still cannot stop an unbounded run when the instruction itself is "do not stop until…": observed live, one subtask ground on for days across 935 terminal commands, re-reading its own files, because nothing capped it and the loop was too diffuse for the window-based detector to catch. `SMALL_MODEL_SUBTASK_MAX_COMMANDS` is a hard ceiling: the pre-execution guard counts terminal commands per subtask (`Store.IncrSubtaskCommands`), and once a subtask reaches the cap it rejects further commands with `SubtaskBudgetMessage`, telling the agent to report its findings and the blocker and conclude. Non-terminal tools (reporting, completing the subtask) still pass, so the agent can finish rather than being deadlocked. The profile defaults it to 150 (generous — most subtasks use far fewer) when the operator leaves it blank; 0 disables it. It is the backstop under the loop detector: the detector steers away from tight loops, the budget bounds everything else.
+
 ## Where the code lives
 
 - `backend/pkg/smallmodel/` — the self-contained logic (budget, state, extraction, tool-output compaction, verifier) with unit tests.

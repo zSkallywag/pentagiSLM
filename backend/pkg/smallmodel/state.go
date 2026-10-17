@@ -74,13 +74,16 @@ type Store struct {
 	mu        sync.RWMutex
 	states    map[Key]*State
 	gateFired map[Key]struct{}
+	// subtaskCmds counts terminal commands per subtask id, for the budget cap.
+	subtaskCmds map[int64]int
 }
 
 // NewStore returns an empty Store.
 func NewStore() *Store {
 	return &Store{
-		states:    make(map[Key]*State),
-		gateFired: make(map[Key]struct{}),
+		states:      make(map[Key]*State),
+		gateFired:   make(map[Key]struct{}),
+		subtaskCmds: make(map[int64]int),
 	}
 }
 
@@ -186,6 +189,22 @@ func (st *Store) IsGestureBlocked(k Key, gesture string) bool {
 	}
 	_, blocked := s.blockedGestures[gesture]
 	return blocked
+}
+
+// IncrSubtaskCommands increments and returns the terminal-command count for a
+// subtask, for the per-subtask budget cap.
+func (st *Store) IncrSubtaskCommands(subtaskID int64) int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.subtaskCmds[subtaskID]++
+	return st.subtaskCmds[subtaskID]
+}
+
+// SubtaskCommands returns the terminal-command count recorded for a subtask.
+func (st *Store) SubtaskCommands(subtaskID int64) int {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	return st.subtaskCmds[subtaskID]
 }
 
 // RepetitionState returns a copy of the recent canonical commands and the number

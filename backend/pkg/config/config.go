@@ -283,6 +283,10 @@ type Config struct {
 	SmallModelBytesPerToken      int    `env:"SMALL_MODEL_BYTES_PER_TOKEN" envDefault:"3"`
 	SmallModelToolOutputMaxBytes int    `env:"SMALL_MODEL_TOOL_OUTPUT_MAX_BYTES" envDefault:"6144"`
 	SmallModelVerifierEnabled    bool   `env:"SMALL_MODEL_VERIFIER_ENABLED" envDefault:"true"`
+	// SmallModelSubtaskMaxCommands caps terminal commands per subtask so an
+	// unbounded run ("do not stop until…") is forced to conclude. 0 disables it;
+	// the profile sets a default when the operator leaves it unspecified.
+	SmallModelSubtaskMaxCommands int `env:"SMALL_MODEL_SUBTASK_MAX_COMMANDS" envDefault:"0"`
 	// SmallModelScope is a comma-separated allowlist of targets the agent may act
 	// against (IPs, CIDRs, or hostnames). Empty means no scope restriction is
 	// enforced by the verifier.
@@ -442,11 +446,18 @@ func applySmallModelProfile(config *Config) {
 		config.SmallModelVerifierEnabled = true
 	}
 
+	// Cap terminal commands per subtask so a runaway subtask (seen looping for
+	// days on a "do not stop" instruction) is forced to conclude.
+	if unspecified("SMALL_MODEL_SUBTASK_MAX_COMMANDS") {
+		config.SmallModelSubtaskMaxCommands = 150
+	}
+
 	logrus.WithFields(logrus.Fields{
-		"verifier_enabled": config.SmallModelVerifierEnabled,
-		"classifier_url":   config.SmallModelClassifierURL,
-		"ctx_window":       config.SmallModelCtxWindow,
-		"scope":            config.SmallModelScope,
+		"verifier_enabled":     config.SmallModelVerifierEnabled,
+		"subtask_max_commands": config.SmallModelSubtaskMaxCommands,
+		"classifier_url":       config.SmallModelClassifierURL,
+		"ctx_window":           config.SmallModelCtxWindow,
+		"scope":                config.SmallModelScope,
 	}).Info("small-model profile active")
 }
 

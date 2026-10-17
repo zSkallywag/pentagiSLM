@@ -364,12 +364,12 @@ func (fp *flowProvider) execToolCall(
 		return response, nil
 	}
 
-	if blockedResponse, blocked := fp.verifyToolCall(funcName, funcArgs, taskID); blocked {
+	if blockedResponse, blocked := fp.verifyToolCall(funcName, funcArgs, taskID, subtaskID); blocked {
 		logger.WithField("verifier", "blocked").Warn("pre-execution verifier blocked tool call")
 		return blockedResponse, nil
 	}
 
-	fp.recordTerminalCommand(funcName, funcArgs, taskID)
+	fp.recordTerminalCommand(funcName, funcArgs, taskID, subtaskID)
 
 	var (
 		err      error

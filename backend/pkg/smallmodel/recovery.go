@@ -34,6 +34,17 @@ func EscalatedRecoveryDirective(canonical string) string {
 	)
 }
 
+// SubtaskBudgetMessage is returned when a subtask has used its command budget,
+// so a "do not stop" run is forced to conclude instead of grinding indefinitely.
+func SubtaskBudgetMessage(count, cap int) string {
+	return fmt.Sprintf(
+		"SUBTASK BUDGET EXHAUSTED: this subtask has run %d terminal commands (limit %d) without completing. "+
+			"No further commands will run for it. Stop now: report the concrete findings and the blocker you have, "+
+			"and complete the subtask — do not keep trying.",
+		count, cap,
+	)
+}
+
 // BlockedGestureMessage is the tool response returned when a disabled gesture is
 // attempted again, so the agent sees the rejection in place of the output.
 func BlockedGestureMessage(canonical string) string {

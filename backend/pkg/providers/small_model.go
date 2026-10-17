@@ -75,12 +75,23 @@ func (fp *flowProvider) sanitizeToolArgs(funcArgs json.RawMessage) json.RawMessa
 // scope. It applies two guards to commands: the scope/destructive verifier, and
 // the strategy gate that holds back a premature wordlist brute-force. Other tools
 // pass through.
-func (fp *flowProvider) verifyToolCall(funcName string, funcArgs json.RawMessage, taskID *int64) (string, bool) {
+func (fp *flowProvider) verifyToolCall(funcName string, funcArgs json.RawMessage, taskID, subtaskID *int64) (string, bool) {
 	if !fp.smallModelEnabled() || !fp.cfg.SmallModelVerifierEnabled {
 		return "", false
 	}
 	if funcName != tools.TerminalToolName {
 		return "", false
+	}
+
+	// Per-subtask command budget: the hardest cap, checked before anything else
+	// so a runaway "do not stop" subtask is forced to conclude.
+	if subtaskID != nil && fp.cfg.SmallModelSubtaskMaxCommands > 0 {
+		if n := fp.smallModelState().SubtaskCommands(*subtaskID); n >= fp.cfg.SmallModelSubtaskMaxCommands {
+			logrus.WithFields(logrus.Fields{
+				"flow": fp.flowID, "subtask": *subtaskID, "guard": "subtask_budget", "count": n,
+			}).Warn("small-model guard exhausted the subtask command budget")
+			return smallmodel.SubtaskBudgetMessage(n, fp.cfg.SmallModelSubtaskMaxCommands), true
+		}
 	}
 
 	var action struct {
@@ -248,7 +259,7 @@ func (fp *flowProvider) smallModelStateBlock(taskID *int64) string {
 // recordTerminalCommand files a terminal command's canonical form into the
 // per-task loop-detection ring before it executes, so DetectStuckByRepetition
 // can see a repeated gesture on the next turn.
-func (fp *flowProvider) recordTerminalCommand(funcName string, funcArgs json.RawMessage, taskID *int64) {
+func (fp *flowProvider) recordTerminalCommand(funcName string, funcArgs json.RawMessage, taskID, subtaskID *int64) {
 	if !fp.smallModelEnabled() || taskID == nil || funcName != tools.TerminalToolName {
 		return
 	}
@@ -260,6 +271,9 @@ func (fp *flowProvider) recordTerminalCommand(funcName string, funcArgs json.Raw
 	}
 	key := smallmodel.Key{FlowID: fp.flowID, TaskID: *taskID}
 	fp.smallModelState().RecordCommand(key, smallmodel.CanonicalizeCommand(action.Input))
+	if subtaskID != nil {
+		fp.smallModelState().IncrSubtaskCommands(*subtaskID)
+	}
 }
 
 // smallModelExamples lazily loads the few-shot example set from the configured
