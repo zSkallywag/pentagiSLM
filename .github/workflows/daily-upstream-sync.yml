@@ -1,0 +1,42 @@
+name: Daily upstream sync
+
+# Keeps this fork level with vxcontrol/pentagi. Scheduled workflows are disabled by default on
+# forks: enable it once from the Actions tab ("Enable workflow"), or run it via Run workflow.
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          # Full history: ancestry decides fast-forward vs. real merge.
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge upstream main
+        run: |
+          git remote add upstream https://github.com/vxcontrol/pentagi.git
+          git fetch upstream main
+          # Fast-forwards when the fork has no own commits, merge-commits when it diverged,
+          # and exits non-zero on conflict so the push below never runs. Never force-pushes.
+          git merge --no-edit upstream/main
+
+      - name: Push
+        run: git push origin HEAD:main
