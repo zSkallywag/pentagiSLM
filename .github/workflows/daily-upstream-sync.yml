@@ -1,0 +1,51 @@
+name: Daily upstream sync
+
+# Keeps this fork level with vxcontrol/pentagi. Scheduled workflows are disabled by default on
+# forks: enable it once from the Actions tab ("Enable workflow"), or run it via Run workflow.
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          # Full history: ancestry decides fast-forward vs. real merge.
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge upstream main
+        run: |
+          git remote add upstream https://github.com/vxcontrol/pentagi.git
+          git fetch upstream main
+
+          # This fork owns README.md: it is rewritten for the SLM fork while upstream keeps rewording
+          # theirs, so a plain merge conflicts on it every time. Driver "true" leaves ours in place and
+          # exits 0, which also stops upstream README text from leaking into a clean 3-way merge.
+          # Kept in .git/info/attributes (not .gitattributes) so the rule stays in this job and never
+          # travels upstream inside a PR; every other path still conflicts normally.
+          git config merge.keep-ours.driver true
+          echo "README.md merge=keep-ours" >> .git/info/attributes
+
+          # Fast-forwards when the fork has no own commits, merge-commits when it diverged,
+          # and exits non-zero on any other conflict so the push below never runs. Never force-pushes.
+          git merge --no-edit upstream/main
+
+      - name: Push
+        run: git push origin HEAD:main
