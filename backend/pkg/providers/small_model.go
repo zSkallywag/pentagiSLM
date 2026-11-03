@@ -11,6 +11,7 @@ import (
 
 	"pentagi/pkg/cast"
 	"pentagi/pkg/smallmodel"
+	"pentagi/pkg/templates"
 	"pentagi/pkg/tools"
 )
 
@@ -43,6 +44,53 @@ func (fp *flowProvider) smallModelState() *smallmodel.Store {
 		fp.smState = smallmodel.NewStore()
 	}
 	return fp.smState
+}
+
+// smallModelRecoverToolCalls promotes tool calls the model wrote as JSON in its
+// message text to real tool calls, returning the remaining text. Recovered calls
+// still pass through the pre-execution guards like any other call.
+func (fp *flowProvider) smallModelRecoverToolCalls(
+	logger *logrus.Entry,
+	content string,
+	executor tools.ContextToolsExecutor,
+) (string, []llms.ToolCall) {
+	if !fp.smallModelEnabled() || strings.TrimSpace(content) == "" {
+		return content, nil
+	}
+
+	defs := executor.Tools()
+	names := make([]string, 0, len(defs))
+	for _, def := range defs {
+		if def.Function != nil {
+			names = append(names, def.Function.Name)
+		}
+	}
+
+	recovered, rest := smallmodel.RecoverToolCalls(content, names)
+	if len(recovered) == 0 {
+		return content, nil
+	}
+
+	calls := make([]llms.ToolCall, 0, len(recovered))
+	recoveredNames := make([]string, 0, len(recovered))
+	for _, rc := range recovered {
+		calls = append(calls, llms.ToolCall{
+			ID:   templates.GenerateFromPattern(fp.tcIDTemplate, rc.Name),
+			Type: "function",
+			FunctionCall: &llms.FunctionCall{
+				Name:      rc.Name,
+				Arguments: rc.Arguments,
+			},
+		})
+		recoveredNames = append(recoveredNames, rc.Name)
+	}
+
+	logger.WithFields(logrus.Fields{
+		"tools": recoveredNames,
+		"count": len(calls),
+	}).Warn("recovered tool call from content")
+
+	return rest, calls
 }
 
 // smallModelBudget builds the token budget from config.

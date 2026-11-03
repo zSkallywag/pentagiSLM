@@ -86,9 +86,17 @@ The credential precondition is fed by a deterministic, keyword-anchored extracto
 
 Loop detection and escalation still cannot stop an unbounded run when the instruction itself is "do not stop until…": observed live, one subtask ground on for days across 935 terminal commands, re-reading its own files, because nothing capped it and the loop was too diffuse for the window-based detector to catch. `SMALL_MODEL_SUBTASK_MAX_COMMANDS` is a hard ceiling: the pre-execution guard counts terminal commands per subtask (`Store.IncrSubtaskCommands`), and once a subtask reaches the cap it rejects further commands with `SubtaskBudgetMessage`, telling the agent to report its findings and the blocker and conclude. Non-terminal tools (reporting, completing the subtask) still pass, so the agent can finish rather than being deadlocked. The profile defaults it to 150 (generous — most subtasks use far fewer) when the operator leaves it blank; 0 disables it. It is the backstop under the loop detector: the detector steers away from tight loops, the budget bounds everything else.
 
+## Tool-call recovery
+
+A small model often knows which tool to call and writes correct JSON for it, but sends it as message text — in a ```` ```json ```` fence, inside `<tool_call>` tags, or bare — instead of through the structured tool-call channel. Observed live: a 9B model sent `code_result` (and even the `advice` call) as fenced JSON in every reply; `fillResult` in `performer.go` collects only `choice.ToolCalls`, so each reply went to the reflector, the model failed every reflector round the same way, three chains died with `reflector called too many times`, and the task aborted. The execution monitor cannot see this failure, because it counts tool calls and there were none.
+
+`smallmodel.RecoverToolCalls` (`toolcallrecovery.go`) breaks the loop at the source. When a non-assistant agent's reply carries no structured tool call, `callWithRetries` hands the text to `smallModelRecoverToolCalls` (`small_model.go`), which scans it for JSON values shaped `{"name", "arguments"}` (also `parameters`, and the OpenAI `{"type": "function", "function": {...}}` wrapper with string-encoded arguments). A value is promoted to an `llms.ToolCall` only when its name is one of the agent's tools and its arguments are a JSON object; an array is taken whole when every element qualifies. Raw newlines inside string values are escaped first, since a model writes them and `encoding/json` rejects them. The recovered JSON — and any fence or `<tool_call>` tag it leaves empty — is removed from the text, the call gets an ID from the provider's tool-call ID template, and it then runs through the same pre-execution guards as any other call. Each recovery is logged as `recovered tool call from content`. The assistant is excluded because it may legitimately answer in prose.
+
+The scan tries a parse at each candidate bracket, so degenerate text (a model repeating `{"name": ...` until `max_tokens`) would cost the square of its length; a work budget bounds it to milliseconds, at the price of possibly missing a call written after such text.
+
 ## Where the code lives
 
-- `backend/pkg/smallmodel/` — the self-contained logic (budget, state, extraction, tool-output compaction, verifier) with unit tests.
+- `backend/pkg/smallmodel/` — the self-contained logic (budget, state, extraction, tool-output compaction, verifier, tool-call recovery) with unit tests.
 - `backend/pkg/providers/small_model.go` — the thin wiring between `flowProvider` and the package.
 - `backend/pkg/providers/performer.go` — the three call sites (state block, budget compaction, per-call sanitize + verify + compact).
 - `backend/pkg/config/config.go` — the `SMALL_MODEL_*` knobs and the profile.
