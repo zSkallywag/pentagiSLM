@@ -516,6 +516,11 @@ func (fp *flowProvider) callWithRetries(
 		}
 
 		result.content = strings.Join(parts, "\n")
+		// The assistant may legitimately answer in prose, so only agents that must
+		// call a tool get their text searched for one.
+		if len(result.funcCalls) == 0 && optAgentType != pconfig.OptionsTypeAssistant {
+			result.content, result.funcCalls = fp.smallModelRecoverToolCalls(logger, result.content, executor)
+		}
 		if strings.Trim(result.content, "' \"\n\r\t") == "" && len(result.funcCalls) == 0 {
 			return fmt.Errorf("no content and tool calls in response: stop reason '%s'", stopReason)
 		}

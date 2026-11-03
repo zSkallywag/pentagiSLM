@@ -37,6 +37,7 @@ A large model can carry a long pentest session in its context and correct itself
 | Context fills up; early findings (open ports, versions) are lost to compaction | A token budget enforced before every model call, plus a **structured state** built by code and re-injected every turn, so facts survive compaction |
 | Raw tool output (nmap, long logs) floods the window | nmap XML is parsed into a few lines, other long output is cut to head + tail, and IPs, ports, banners and CVEs are extracted by regex |
 | Malformed JSON in tool-call arguments | Arguments are sanitized and validated before execution; the existing repair path stays as a second line |
+| Writes a correct tool call as message text (a ` ```json ` block) instead of a structured call, until the reflector gives up and the task aborts | Calls written as text are recovered and run as real tool calls, through the same guards |
 | Keeps varying a dead approach (new timeout, new wrapper, same script) instead of abandoning it | Commands are reduced to their canonical shape; repetition **without new facts** triggers a recovery directive, then blocks the gesture outright if the model ignores it |
 | Runs a tool that isn't installed (`sshpass: not found`) over and over | The "command not found" signal is lifted into the state, where it stays visible above compaction |
 | Reads `id` → `root` in its own sandbox and believes it owns the target (one run fabricated a captured flag this way) | Every terminal result is stamped with where it actually ran |
@@ -202,6 +203,8 @@ A short tour. [`SMALL_MODEL_TUNING.md`](SMALL_MODEL_TUNING.md) has the full desi
 
 **Tool-call hygiene.** Every tool call's arguments are sanitized for JSON control characters before execution, keeping the sanitized form only if it is valid JSON. When a tool call is orphaned, the repair message now tells the model the call may have partially run and to verify state before retrying, instead of "please try again".
 
+**Tool-call recovery.** A small model often knows which tool to call and writes correct JSON for it, but sends it as message text: in a ` ```json ` block, inside `<tool_call>` tags, or bare. Upstream treats that as prose and hands it to the reflector, and the same model tends to fail every reflector round the same way until the chain aborts. In small-model mode, a reply with no structured tool calls is searched for JSON shaped `{"name": …, "arguments": {…}}` (also `parameters`, and the OpenAI `{"function": {…}}` wrapper). A match is promoted to a real tool call only if the name is one of the agent's tools and the arguments are a JSON object. Recovered calls go through the pre-execution guards like any other call, and each recovery is logged as `recovered tool call from content`. The assistant agent is left alone, since it may legitimately answer in prose.
+
 **Pre-execution guards.** Four checks run before any command, and each rejection is explained back to the model as the tool response:
 - *Verifier:* destructive patterns and out-of-scope targets are blocked, fail-closed.
 - *Strategy gate:* a wordlist attack (`hydra`, `medusa`, `ncrack`, `patator` with `-P`/`-L`) is held back if the state already holds a credential or shows no recon yet. Single targeted attempts (`-p one -l user`) always pass. It fires at most once per task, then trusts the agent.
@@ -269,6 +272,7 @@ backend/pkg/smallmodel/          self-contained logic, each file with unit tests
   execcontext.go                 execution-context stamp
   classifier.go                  client for the decision sidecar
   fewshot.go                     similarity-ranked few-shot examples
+  toolcallrecovery.go            tool calls recovered from message text
 backend/pkg/providers/
   small_model.go                 wiring between the flow provider and the package
   performer.go                   call sites: state block, budget, sanitize → guards → compact
