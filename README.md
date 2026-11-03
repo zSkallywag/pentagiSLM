@@ -24,6 +24,7 @@ Everything is gated behind `SMALL_MODEL_MODE` (off by default). With the flag of
 - [Repository layout](#repository-layout)
 - [Build and test](#build-and-test)
 - [Known gaps and next steps](#known-gaps-and-next-steps)
+- [Provider reference](#provider-reference)
 - [Credits and license](#credits-and-license)
 
 ---
@@ -300,6 +301,273 @@ go test ./pkg/smallmodel/... ./pkg/config/... ./pkg/cast/... ./pkg/csum/... ./pk
 - **More classifier decisions.** Allow/deny decisions are the next closed-set choice to offload.
 - **"Varied but stuck" loops.** Many different actions, none working, none repeated. Deliberately not detected yet, to avoid flagging slow but genuine exploration.
 - **First-class tools for mechanism gaps,** for example non-interactive SSH authentication handled in code instead of left to the model.
+
+## Provider reference
+
+Provider setup is unchanged from upstream. The Gemini and Qwen sections below are kept here because a backend test (`TestCatalog_ReadmeProviderSectionsMatchTheShippedConfig`) checks them against the shipped provider configs. When those configs change upstream, copy the matching sections from the upstream README.
+
+### Google AI (Gemini) Provider Configuration
+
+PentAGI integrates with Google's Gemini models through the Google AI API, offering state-of-the-art multimodal reasoning capabilities with extended thinking and context caching.
+
+#### Configuration Variables
+
+| Variable            | Default                                     | Description                    |
+| ------------------- | ------------------------------------------- | ------------------------------ |
+| `GEMINI_API_KEY`    |                                             | API key for Google AI services |
+| `GEMINI_SERVER_URL` | `https://generativelanguage.googleapis.com` | Google AI API endpoint         |
+
+#### Configuration Examples
+
+```bash
+# Basic Gemini setup
+GEMINI_API_KEY=your_gemini_api_key
+GEMINI_SERVER_URL=https://generativelanguage.googleapis.com
+
+# Using with proxy
+GEMINI_API_KEY=your_gemini_api_key
+PROXY_URL=http://your-proxy:8080
+```
+
+#### Supported Models
+
+PentAGI lists 14 Gemini model IDs that responded through the tested API endpoint. Availability in the catalogue does not mean a model is suitable for every agent role: the saved-chain results below determine the bundled defaults. Models marked with `*` are used in `config.yml`; the [full replay matrix](MODEL_REPLAY_RESULTS.md) describes role and outcome limits.
+
+| Model ID | Thinking | Context | Price (Input/Output/Cache) | Saved-chain result |
+| --- | --- | --- | --- | --- |
+| `gemini-3.8-flash` | ✅ | 1M | $0.75/$3.75/$0.075 | API responds; 10/10 saved generator calls were content-filtered |
+| `gemini-3.7-flash` | ✅ | 1M | $0.75/$3.75/$0.075 | API responds; 10/10 saved generator calls were content-filtered; former default |
+| `gemini-3.6-flash` | ✅ | 1M | $0.75/$3.75/$0.075 | API responds; 10/10 saved generator calls returned text without a tool |
+| `gemini-3.5-flash` | ✅ | 1M | $1.5/$9/$0.15 | API responds; 10/10 saved generator calls returned text without a tool |
+| `gemini-3.5-flash-lite`* | ✅ | 1M | $0.3/$2.5/$0.03 | Complex-role default; eight direct plans and two after a safe `memorist` continuation |
+| `gemini-3.1-pro-preview` | ✅ | 1M | $2/$12/$0.2 | API responds; 10/10 saved generator calls returned text without a tool |
+| `gemini-3.1-pro-preview-customtools` | ✅ | 1M | $2/$12/$0.2 | API responds; 10/10 saved generator calls returned text without a tool |
+| `gemini-3.1-flash-lite`* | ✅ | 1M | $0.25/$1.5/$0.025 | Simple-role default; direct plan on all ten saved generator chains |
+| `gemini-3-flash-preview` | ✅ | 1M | $0.5/$3/$0.05 | API responds; three direct plans and five generator timeouts |
+| `gemini-2.5-pro` | ✅ | 1M | $1.25/$10/$0.125 | API responds; ten direct plans, but four role-smoke provider errors |
+| `gemini-2.5-flash` | ✅ | 1M | $0.3/$2.5/$0.03 | Ten direct plans; access is limited for new API projects |
+| `gemini-2.5-flash-lite` | ✅ | 1M | $0.1/$0.4/$0.01 | API responds; five of ten generator answers were empty |
+| `gemma-4-31b-it` | ✅ | 256K | Free/Free/Free | API responds; seven direct plans and three generator timeouts |
+| `gemma-4-26b-a4b-it` | ✅ | 256K | Free/Free/Free | Direct plan on all ten saved generator chains |
+
+**Prices**: Per 1M tokens. Google [limits Gemini 2.5 access for new projects](https://ai.google.dev/gemini-api/docs/models/gemini-2.5-pro), so PentAGI uses the tested 3.1 Flash-Lite as its fallback and simple-role default. Existing custom 2.5 configurations remain usable where the project has access.
+
+**Default Model Assignments (config.yml)**:
+- **`gemini-3.1-flash-lite`** - `simple`, `simple_json`, `reflector`, `searcher`, `enricher`
+- **`gemini-3.5-flash-lite`** - `primary_agent`, `assistant`, `generator`, `refiner`, `adviser`, `coder`, `installer`, `pentester`
+
+Both default models passed a basic API/configuration smoke for every role. [Google reports stronger agentic and coding performance for 3.5 Flash-Lite than 3.1 Flash-Lite](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-6-flash-3-5-flash-lite-3-5-flash-cyber/); PentAGI's saved production chains cover generator and reflector only, so the smoke does not establish semantic quality or multi-turn reliability for other roles. On two saved generator chains, 3.5 Flash-Lite first chose the allowed `memorist` tool and called `subtask_list` after a synthetic tool response; no real tool was executed in that continuation.
+
+**Reasoning Effort Levels**:
+- **High**: Deeper reasoning for planning and review (`primary_agent`, `generator`, `refiner`, `adviser`)
+- **Medium**: Balanced reasoning for execution roles (`assistant`, `coder`, `installer`, `pentester`)
+- **Not set**: No thinking setting is sent and the model's own default applies (`simple`, `simple_json`, `reflector`, `searcher`, `enricher`)
+
+### Qwen Provider Configuration
+
+PentAGI uses one OpenAI-compatible door for both Qwen Cloud and Alibaba Cloud Model Studio (DashScope). The bundled catalogue is the union of their agent-capable Chat Completions models, while the default role configuration uses only model IDs available on both platforms.
+
+#### Configuration Variables
+
+| Variable           | Default Value                                          | Description                                         |
+| ------------------ | ------------------------------------------------------ | --------------------------------------------------- |
+| `QWEN_API_KEY`     |                                                        | Qwen Cloud, DashScope, or gateway API key           |
+| `QWEN_SERVER_URL`  | `https://dashscope-us.aliyuncs.com/compatible-mode/v1` | Direct API or OpenAI-compatible gateway base URL    |
+| `QWEN_PROVIDER`    |                                                        | Gateway route prefix: `qwen_cloud` or `dashscope`   |
+
+#### Configuration Examples
+
+```bash
+# Direct Alibaba Cloud Model Studio usage (Global/US endpoint)
+QWEN_API_KEY=your_qwen_api_key
+QWEN_SERVER_URL=https://dashscope-us.aliyuncs.com/compatible-mode/v1
+QWEN_PROVIDER=
+
+# Alternative endpoints
+QWEN_SERVER_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1  # International (Singapore)
+QWEN_SERVER_URL=https://dashscope.aliyuncs.com/compatible-mode/v1       # Chinese Mainland (Beijing)
+
+# Qwen Cloud through LiteLLM
+QWEN_API_KEY=your_litellm_key
+QWEN_SERVER_URL=http://litellm-proxy:4000
+QWEN_PROVIDER=qwen_cloud
+
+# Alibaba Cloud through LiteLLM
+QWEN_PROVIDER=dashscope
+```
+
+#### Supported Models
+
+PentAGI ships 50 text, reasoning, coding, and vision-language catalogue entries available from at least one of the two platforms. Image generation, video, speech, realtime, translation-only, embedding, reranking, and decision APIs use different protocols or billing units and are not exposed as PentAGI chat models. Prices below are Alibaba Cloud international list rates per 1M tokens where Alibaba offers the model; Qwen Cloud can bill differently.
+
+**Cross-platform model IDs used for portable configuration**
+
+| Availability | Models |
+| ------------ | ------ |
+| Qwen Cloud and DashScope | `qwen3.8-max`, `qwen3.8-flash`, `qwen3.7-plus`, `qwen3.7-max`, `qwen3.6-flash`, `deepseek-v4.1-flash`, `deepseek-v4-pro` |
+| Qwen Cloud only | `deepseek-v4-pro-0813` |
+| DashScope only | All other entries in the bundled catalogue |
+
+**Flagship Models (Top-tier Reasoning)**
+
+| Model ID                     | Thinking | Intl | Global/US | China | Price (Input/Output/Cache) | Use Case                                                |
+| ---------------------------- | -------- | ---- | --------- | ----- | -------------------------- | ------------------------------------------------------- |
+| `qwen3.8-max`                | ✅        | —    | —         | —     | $2.00/$6.00/$0.25          | Newest flagship succeeding Qwen3.7-Max                  |
+| `qwen3.8-omni-flash`         | ✅        | ✅    | ✅         | ✅     | $0.15/$0.47/—              | Current multimodal Omni tier                            |
+| `qwen3.7-max`                | ✅        | ✅    | ✅         | ✅     | $2.50/$7.50/$0.50          | Next-gen flagship for agent-centric era                 |
+| `qwen3.6-max-preview`        | ✅        | ✅    | ✅         | ✅     | $1.30/$7.80/$0.13          | Preview Max with enhanced vibe coding & front-end skills |
+| `qwen3-max`                  | ✅        | ✅    | ✅         | ✅     | $1.20/$6.00/$0.24          | Previous-gen flagship with agent programming upgrades   |
+| `qwen-max`                   | ❌        | ✅    | ✅         | ✅     | $1.60/$6.40/—              | Legacy 32K text flagship                                |
+| `qwen-plus`                  | ✅        | ✅    | ✅         | ✅     | $0.40/$4.00/$0.08          | Qwen3-backbone Plus with switchable thinking modes      |
+
+**Balanced Plus Models (Mid-tier)**
+
+| Model ID                     | Thinking | Intl | Global/US | China | Price (Input/Output/Cache) | Use Case                                                |
+| ---------------------------- | -------- | ---- | --------- | ----- | -------------------------- | ------------------------------------------------------- |
+| `qwen3.7-plus`               | ✅        | —    | —         | —     | $0.40/$1.60/$0.08          | Cost-efficient tier of the Qwen3.7 generation           |
+| `qwen3.6-plus`               | ✅        | ✅    | ✅         | ✅     | $0.50/$3.00/$0.05          | Native VL Plus with agentic coding                      |
+| `qwen3.5-plus`               | ✅        | ✅    | ✅         | ✅     | $0.40/$2.40/$0.04          | Previous-gen native VL with strong multimodal capabilities |
+
+**Fast Flash Models (Cost-optimized)**
+
+| Model ID                     | Thinking | Intl | Global/US | China | Price (Input/Output/Cache) | Use Case                                                |
+| ---------------------------- | -------- | ---- | --------- | ----- | -------------------------- | ------------------------------------------------------- |
+| `qwen3.8-flash`              | ✅        | —    | —         | —     | $0.15/$0.47/$0.016         | Cost-efficient tier of the Qwen3.8 generation           |
+| `qwen3.7-flash`              | ✅        | —    | —         | —     | $0.03/$0.13/$0.02          | Low-latency tier of the Qwen3.7 generation              |
+| `qwen3.6-flash`*             | ✅        | ✅    | ✅         | ✅     | $0.25/$1.50/$0.05          | Shared utility model                                    |
+| `qwen3.5-flash`              | ✅        | ✅    | ✅         | ✅     | $0.10/$0.40/$0.01          | Ultra-fast lightweight                                  |
+| `qwen-flash`                 | ✅        | ✅    | ✅         | ✅     | $0.05/$0.40/$0.01          | Qwen3-series Flash with 1M context, tiered pricing      |
+
+**Code-Specialized Models**
+
+| Model ID                     | Thinking | Intl | Global/US | China | Price (Input/Output/Cache) | Use Case                                                |
+| ---------------------------- | -------- | ---- | --------- | ----- | -------------------------- | ------------------------------------------------------- |
+| `qwen3-coder-plus`           | ❌        | ✅    | ✅         | ✅     | $1.00/$5.00/$0.20          | Strong coding agent with autonomous programming         |
+| `qwen3-coder-flash`          | ❌        | ✅    | ✅         | ✅     | $0.30/$1.50/$0.06          | Fast code-gen with multi-turn tool stability            |
+| `qwen3-coder-next`           | ❌        | ✅    | ✅         | ✅     | $0.30/$1.50/—              | Open-source code generation, SOTA at same scale         |
+
+**Vision-Language Models (Browser & Screenshot Analysis)**
+
+| Model ID                     | Thinking | Intl | Global/US | China | Price (Input/Output/Cache) | Use Case                                                |
+| ---------------------------- | -------- | ---- | --------- | ----- | -------------------------- | ------------------------------------------------------- |
+| `qwen3-vl-plus`              | ✅        | ✅    | ✅         | ✅     | $0.20/$1.60/$0.04          | VL with visual agent capabilities, ultra-long video understanding |
+| `qwen3-vl-flash`             | ✅        | ✅    | ✅         | ✅     | $0.05/$0.40/$0.01          | Small VL with 2D/3D localization for browser triage     |
+| `qvq-max`                    | ✅        | ✅    | ✅         | ✅     | $1.20/$4.80/—              | Visual reasoning with chain-of-thought                  |
+| `qwen3-vl-235b-a22b-thinking` | ✅        | —    | —         | —     | $0.40/$4.00/—              | Open-source 235B MoE VL (~22B active) with reasoning    |
+| `qwen3-vl-235b-a22b-instruct` | ❌        | —    | —         | —     | $0.40/$1.60/—              | Open-source 235B MoE VL (~22B active), instruction-following |
+| `qwen3-vl-32b-instruct`      | ❌        | —    | —         | —     | $0.16/$0.64/—              | Open-source 32B dense VL, instruction-following         |
+| `qwen3-vl-30b-a3b-thinking`  | ✅        | —    | —         | —     | $0.20/$2.40/—              | Open-source 30B MoE VL (~3B active) with reasoning      |
+| `qwen3-vl-30b-a3b-instruct`  | ❌        | —    | —         | —     | $0.20/$0.80/—              | Open-source 30B MoE VL (~3B active), instruction-following |
+
+**Open-Source Qwen3.8 Series**
+
+| Model ID                     | Thinking | Intl | Global/US | China | Price (Input/Output/Cache) | Use Case                                                |
+| ---------------------------- | -------- | ---- | --------- | ----- | -------------------------- | ------------------------------------------------------- |
+| `qwen3.8-2.4t-a95b`          | ✅        | —    | —         | —     | $2.00/$6.00/—              | Open-source 3.8 flagship, always reasons                |
+| `qwen3.8-27b`                | ✅        | —    | —         | —     | $0.50/$3.00/$0.10          | Dense open-weight 3.8 tier, hybrid thinking, 1M context |
+
+**Open-Source Qwen3.6 Series**
+
+| Model ID                     | Thinking | Intl | Global/US | China | Price (Input/Output/Cache) | Use Case                                                |
+| ---------------------------- | -------- | ---- | --------- | ----- | -------------------------- | ------------------------------------------------------- |
+| `qwen3.6-27b`                | ✅        | ✅    | ✅         | ✅     | $0.60/$3.60/—              | Native VL on hybrid architecture, on-premises ready     |
+| `qwen3.6-35b-a3b`            | ✅        | ✅    | ✅         | ✅     | $0.25/$1.49/—              | Efficient 35B MoE (~3B active) for continuous monitoring |
+
+**Open-Source Qwen3.5 Series**
+
+| Model ID                     | Thinking | Intl | Global/US | China | Price (Input/Output/Cache) | Use Case                                                |
+| ---------------------------- | -------- | ---- | --------- | ----- | -------------------------- | ------------------------------------------------------- |
+| `qwen3.5-397b-a17b`          | ✅        | ✅    | ✅         | ✅     | $0.60/$3.60/—              | Largest 397B params (~17B active), exceptional reasoning |
+| `qwen3.5-122b-a10b`          | ✅        | ✅    | ✅         | ✅     | $0.40/$3.20/—              | Large 122B params (~10B active), strong balance         |
+| `qwen3.5-35b-a3b`            | ✅        | ✅    | ✅         | ✅     | $0.25/$2.00/—              | Efficient 35B MoE (~3B active), cost-effective          |
+| `qwen3.5-27b`                | ✅        | ✅    | ✅         | ✅     | $0.30/$2.40/—              | Medium 27B with hybrid linear attention + sparse MoE    |
+
+**Open-Source Qwen3 Coder Series**
+
+| Model ID                              | Thinking | Intl | Global/US | China | Price (Input/Output/Cache) | Use Case                                                |
+| ------------------------------------- | -------- | ---- | --------- | ----- | -------------------------- | ------------------------------------------------------- |
+| `qwen3-coder-480b-a35b-instruct`      | ❌        | ✅    | ✅         | ✅     | $1.50/$7.50/—              | Largest open coder MoE (480B/~35B active)               |
+| `qwen3-coder-30b-a3b-instruct`        | ❌        | ✅    | ✅         | ✅     | $0.45/$2.25/—              | Efficient 30B MoE (~3B active), repository-scale        |
+
+**Open-Source Qwen3 Dense & MoE Series**
+
+| Model ID                              | Thinking | Intl | Global/US | China | Price (Input/Output/Cache) | Use Case                                                |
+| ------------------------------------- | -------- | ---- | --------- | ----- | -------------------------- | ------------------------------------------------------- |
+| `qwen3-next-80b-a3b-thinking`         | ✅        | ✅    | ✅         | ✅     | $0.15/$1.20/—              | Next-gen 80B MoE (~3B active) thinking-only             |
+| `qwen3-next-80b-a3b-instruct`         | ❌        | ✅    | ✅         | ✅     | $0.15/$1.20/—              | Next-gen 80B MoE instruction-following                  |
+| `qwen3-235b-a22b-thinking-2507`       | ✅        | —    | —         | —     | $0.23/$2.30/—              | 235B MoE (~22B active) thinking variant                 |
+| `qwen3-30b-a3b-thinking-2507`         | ✅        | —    | —         | —     | $0.20/$2.40/—              | 30B MoE (~3B active) thinking variant                   |
+| `qwen3-30b-a3b-instruct-2507`         | ❌        | —    | —         | —     | $0.20/$0.80/—              | 30B MoE (~3B active) non-thinking variant               |
+
+**Third-Party Models**
+
+These models share the OpenAI-compatible Qwen door. Availability differs by platform; the cross-platform table above is authoritative for portable role configuration.
+
+| Model ID                              | Thinking | Context | Price (Input/Output/Cache) | Use Case                                                |
+| ------------------------------------- | -------- | ------- | -------------------------- | ------------------------------------------------------- |
+| `glm-5.3-prime`                       | ✅        | 1M      | $2.80/$8.80/—              | DashScope priority GLM route |
+| `glm-5.2-fast-preview`                | ✅        | 1M      | $2.80/$8.80/—              | DashScope high-throughput GLM 5.2 route |
+| `glm-5.2`                             | ✅        | 1M      | $1.40/$4.40/$0.28          | Zhipu AI GLM flagship route |
+| `deepseek-v4.1-flash`*                | ✅        | 1M      | $0.15/$0.60/—              | Current shared low-latency DeepSeek model |
+| `deepseek-v4-pro`*                    | ✅        | 1M      | $2.40/$4.80/$0.20          | Shared model for security and tool-heavy roles |
+| `deepseek-v4-pro-0813`                | ✅        | 1M      | $2.40/$4.80/$0.20          | Qwen Cloud-only V4 Pro snapshot |
+| `deepseek-v4-flash-0731`              | ✅        | 1M      | $0.44/$1.32/$0.088         | Legacy DashScope Flash snapshot |
+| `kimi-k3`                             | ✅        | 1M      | $3.00/$15.00/$0.30         | Current Kimi flagship on DashScope |
+| `kimi-k2.7-code`                      | ✅        | 262K    | $0.95/$4.00/$0.19          | Moonshot coding model, thinking always on, 16K output ceiling |
+
+**Prices**: Per 1M tokens. Cache pricing reflects implicit cache hit (when available); MoE/dense open-source models do not expose cache pricing. Tiered models (Max/Plus) show lowest-tier pricing (typically ≤32k or ≤256k input); larger contexts incur higher rates per Alibaba Cloud pricing. `deepseek-v4-flash-0731` shows the busy-hours rate; idle hours bill half.
+
+**Region Availability**:
+- **Intl** (International): Singapore region (`dashscope-intl.aliyuncs.com`)
+- **Global/US**: US Virginia region (`dashscope-us.aliyuncs.com`)
+- **China**: Chinese Mainland Beijing region (`dashscope.aliyuncs.com`)
+- **—**: availability in that region is not recorded here
+
+**Default Agent Configuration**:
+| Agent Role                                                                   | Default Model       | Tier      |
+| ---------------------------------------------------------------------------- | ------------------- | --------- |
+| `simple`, `simple_json`, `reflector`, `searcher`, `enricher`                 | `qwen3.6-flash`     | Utility   |
+| `primary_agent`, `assistant`, `coder`, `installer`, `pentester`              | `deepseek-v4.1-flash` | Workhorse |
+| `generator`, `refiner`, `adviser`                                            | `deepseek-v4-pro`   | Planning  |
+
+The role configuration must run unchanged behind `qwen_cloud/` and `dashscope/`. Qwen 3.6 Flash handles utility calls, DeepSeek V4.1 Flash provides the lower-cost workhorse tier, and DeepSeek V4 Pro remains on planning and advice. Thinking controls are left at provider defaults because Qwen Cloud does not accept the same disable operation that DashScope supports.
+
+**Key Features**:
+- **Agent-Centric Design**: Qwen3.7-Max is purpose-built for long-horizon autonomous execution and tool invocation
+- **Automatic Context Caching**: 30-50% cost reduction on repeated context with implicit cache
+- **Extended Thinking**: Chain-of-thought reasoning for complex security analysis (Qwen3.7/3.6/3.5/3-Max, QVQ-Max)
+- **Code Specialization**: Qwen3-Coder series with multi-turn tool interaction and repository-level understanding
+- **Vision-Language**: Qwen3-VL series for browser screenshot triage, 2D/3D localization, OCR-level analysis
+- **Tool Calling**: Seamless integration with 20+ pentesting tools via function calling
+- **Streaming**: Real-time response streaming for interactive workflows
+- **Multilingual**: Strong Chinese, English, and multi-language support
+- **Open-Source Variants**: Dense and MoE models from 27B to 2.4T for on-premises/air-gapped deployments
+
+**LiteLLM Integration**: Set `QWEN_PROVIDER=qwen_cloud` for Qwen Cloud routes or `QWEN_PROVIDER=dashscope` for Alibaba Cloud routes. Leave it empty for direct DashScope API usage.
+
+#### Alternative Integrations
+
+DashScope is fully OpenAI-compatible, so Qwen can also power two other PentAGI subsystems through the standard OpenAI client.
+
+**As embedding provider** (`text-embedding-v4`, see [Alibaba Cloud Model Studio pricing](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=prices)):
+
+```bash
+EMBEDDING_PROVIDER=openai
+EMBEDDING_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1  # International (Singapore)
+# EMBEDDING_URL=https://dashscope.aliyuncs.com/compatible-mode/v1     # Chinese Mainland
+EMBEDDING_KEY=sk-*******
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_BATCH_SIZE=         # optional, default applies
+EMBEDDING_STRIP_NEW_LINES=    # optional, default applies
+```
+
+> Note: the Global/US DashScope endpoint (`dashscope-us.aliyuncs.com`) does **not** expose embedding APIs — use the International or China endpoints for `text-embedding-v4`.
+
+**As OpenAI-typed custom LLM provider**: instead of the dedicated `QWEN_*` variables, you can wire any Qwen chat model through PentAGI's custom OpenAI-compatible provider by pointing `OPENAI_SERVER_URL` (or a custom provider entry) to the DashScope `/compatible-mode/v1` endpoint and selecting the desired Qwen model name. Useful when you already manage all model traffic through a single OpenAI-shaped client (e.g. shared with LiteLLM/OneAPI proxies).
+
+### Other providers
+
+OpenAI, Anthropic, AWS Bedrock, Ollama, DeepSeek, GLM, Kimi, MiniMax, Mistral, xAI and custom OpenAI-compatible endpoints are documented in the [upstream README](https://github.com/vxcontrol/pentagi#readme).
 
 ## Credits and license
 
