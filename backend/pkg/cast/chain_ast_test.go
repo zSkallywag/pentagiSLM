@@ -547,7 +547,7 @@ func TestChainAST_NewChainAST_ParsesOrRepairsAGeneratedChain(t *testing.T) {
 				{"tool-3 (fallback)", "tool-4 (fallback)", "tool-5 (fallback)"},
 				{"tool-6 (fallback)"},
 			},
-			wantSizes: [][]int{{60, 38, 22}, {246, 10, 214, 22}, {438, 10, 321, 107}},
+			wantSizes: [][]int{{60, 38, 22}, {578, 10, 546, 22}, {1102, 10, 819, 273}},
 		},
 		{
 			name:      "a repaired first section leaves the answered third one as it was",
@@ -559,7 +559,7 @@ func TestChainAST_NewChainAST_ParsesOrRepairsAGeneratedChain(t *testing.T) {
 				nil,
 				{"tool-3", "tool-4"},
 			},
-			wantSizes: [][]int{{252, 38, 214}, {32, 10, 22}, {178, 10, 168}},
+			wantSizes: [][]int{{584, 38, 546}, {32, 10, 22}, {178, 10, 168}},
 		},
 		{
 			name:      "the first seven responses of five alternating sections missing are replaced by fallbacks",
@@ -573,7 +573,7 @@ func TestChainAST_NewChainAST_ParsesOrRepairsAGeneratedChain(t *testing.T) {
 				nil,
 				{"tool-8", "tool-9", "tool-7 (fallback)"},
 			},
-			wantSizes: [][]int{{359, 38, 321}, {32, 10, 22}, {331, 10, 321}, {32, 10, 22}, {285, 10, 275}},
+			wantSizes: [][]int{{857, 38, 819}, {32, 10, 22}, {829, 10, 819}, {32, 10, 22}, {451, 10, 441}},
 		},
 	}
 
@@ -1647,7 +1647,7 @@ func TestChainAST_NormalizeToolCallIDs_FollowsAForcedRepairThroughAProviderSwitc
 
 	reparsed, err := NewChainAST(ast.Messages(), false)
 	require.NoError(t, err, "the chain must parse without force")
-	assertChainASTSizes(t, [][]int{{335, 43, 275, 17}, {275, 22, 20, 233}, {397, 23, 246, 128}, {8, 8}}, reparsed)
+	assertChainASTSizes(t, [][]int{{335, 43, 275, 17}, {275, 22, 20, 233}, {563, 23, 246, 294}, {8, 8}}, reparsed)
 }
 
 func TestChainAST_ClearReasoning_StripsReasoningAndKeepsContent(t *testing.T) {
