@@ -287,6 +287,12 @@ type Config struct {
 	// unbounded run ("do not stop until…") is forced to conclude. 0 disables it;
 	// the profile sets a default when the operator leaves it unspecified.
 	SmallModelSubtaskMaxCommands int `env:"SMALL_MODEL_SUBTASK_MAX_COMMANDS" envDefault:"0"`
+	// SmallModelMaxContinuations caps how many times the harness may ask a small
+	// model to continue a response that was cut off by the generation-token limit
+	// (stop reason 'length') instead of replaying the identical request. 0 disables
+	// continuation and restores identical-replay behavior; only active when
+	// SMALL_MODEL_MODE is on.
+	SmallModelMaxContinuations int `env:"SMALL_MODEL_MAX_CONTINUATIONS" envDefault:"2"`
 	// SmallModelScope is a comma-separated allowlist of targets the agent may act
 	// against (IPs, CIDRs, or hostnames). Empty means no scope restriction is
 	// enforced by the verifier.

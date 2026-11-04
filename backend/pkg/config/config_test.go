@@ -163,7 +163,7 @@ func clearConfigEnv(t *testing.T) {
 		"ASSISTANT_SUMMARIZER_KEEP_QA_SECTIONS",
 		"SMALL_MODEL_MODE", "SMALL_MODEL_CTX_WINDOW", "SMALL_MODEL_CTX_BUDGET_PERCENT",
 		"SMALL_MODEL_BYTES_PER_TOKEN", "SMALL_MODEL_TOOL_OUTPUT_MAX_BYTES",
-		"SMALL_MODEL_VERIFIER_ENABLED", "SMALL_MODEL_SUBTASK_MAX_COMMANDS", "SMALL_MODEL_SCOPE", "SMALL_MODEL_DENIED_COMMANDS",
+		"SMALL_MODEL_VERIFIER_ENABLED", "SMALL_MODEL_SUBTASK_MAX_COMMANDS", "SMALL_MODEL_SCOPE", "SMALL_MODEL_DENIED_COMMANDS", "SMALL_MODEL_MAX_CONTINUATIONS",
 		"SMALL_MODEL_FEWSHOT_FILE", "SMALL_MODEL_FEWSHOT_K", "SMALL_MODEL_CLASSIFIER_URL",
 		"PROXY_URL", "EXTERNAL_SSL_CA_PATH", "EXTERNAL_SSL_INSECURE", "HTTP_CLIENT_TIMEOUT",
 		"OTEL_HOST", "LANGFUSE_BASE_URL", "LANGFUSE_PROJECT_ID", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY",
@@ -546,4 +546,26 @@ func TestConfig_NewConfig_SmallModelModeKeepsExplicitSummarizerThresholds(t *tes
 
 	assert.Equal(t, 40000, config.SummarizerLastSecBytes, "an explicit value must survive the small-model profile")
 	assert.Equal(t, 7*1024, config.SummarizerMaxBPBytes)
+}
+
+func TestConfig_NewConfig_SmallModelMaxContinuationsDefault(t *testing.T) {
+	clearConfigEnv(t)
+	t.Chdir(t.TempDir())
+
+	config, err := NewConfig()
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, config.SmallModelMaxContinuations, "default continuation cap must be 2")
+}
+
+func TestConfig_NewConfig_SmallModelMaxContinuationsExplicitZero(t *testing.T) {
+	clearConfigEnv(t)
+	t.Chdir(t.TempDir())
+	t.Setenv("SMALL_MODEL_MODE", "true")
+	t.Setenv("SMALL_MODEL_MAX_CONTINUATIONS", "0")
+
+	config, err := NewConfig()
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, config.SmallModelMaxContinuations, "explicit 0 must parse to 0 and disable continuations")
 }
