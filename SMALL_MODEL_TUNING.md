@@ -94,11 +94,21 @@ A small model often knows which tool to call and writes correct JSON for it, but
 
 The scan tries a parse at each candidate bracket, so degenerate text (a model repeating `{"name": ...` until `max_tokens`) would cost the square of its length; a work budget bounds it to milliseconds, at the price of possibly missing a call written after such text.
 
+## Truncation continuation
+
+When a small model's response is cut off by the generation-token limit — stop reason `length` — and carries no structured tool call, the retry loop in `callWithRetries` (`performer.go`) used to replay the identical request. Because truncation is deterministic, the replay would cut off identically and burn all three `maxRetriesToCallAgentChain` retries before the reflector killed the chain. This was the exact failure that killed pentester chains: `max retries reached, 3 ... stop reason 'length'`.
+
+The truncation-continuation loop breaks that cycle. When `SMALL_MODEL_MAX_CONTINUATIONS` is greater than zero and the response has stop reason `length` and no tool calls, `callWithRetries` clones the chain locally, appends the partial content as an assistant message (if any), appends the directive `Continue your previous answer from where it stopped. Do not repeat content you have already provided.`, and re-issues immediately — no `delayBetweenRetries` backoff, since truncation is deterministic not transient. Each continuation consumes one of the retry slots, so the total call budget is unchanged. When the continuation budget is exhausted the loop falls through to today's behaviour.
+
+Partial pieces are accumulated and joined into `result.content`, so the caller receives a complete answer even when the model needed multiple turns to finish. The continuation messages are kept on the local diverged chain only; they never reach the caller's chain or the persisted msg-chain DB. Every continuation is logged with `continuation_iteration`, `stop_reason` and `accumulated_bytes`. The mechanism runs through `ErrEmptyModelResponse` as the sentinel, so the retry loop correctly distinguishes a `length`-empty response from other failure classes.
+
+`SMALL_MODEL_MAX_CONTINUATIONS` defaults to `2` and can be set to `0` to disable the behaviour (identical-replay, the upstream default). It is only active when `SMALL_MODEL_MODE=true`.
+
 ## Where the code lives
 
 - `backend/pkg/smallmodel/` — the self-contained logic (budget, state, extraction, tool-output compaction, verifier, tool-call recovery) with unit tests.
 - `backend/pkg/providers/small_model.go` — the thin wiring between `flowProvider` and the package.
-- `backend/pkg/providers/performer.go` — the three call sites (state block, budget compaction, per-call sanitize + verify + compact).
+- `backend/pkg/providers/performer.go` — the three call sites (state block, budget compaction, per-call sanitize + verify + compact), and the truncation-continuation loop in `callWithRetries` (see `ErrEmptyModelResponse`).
 - `backend/pkg/config/config.go` — the `SMALL_MODEL_*` knobs and the profile.
 - `backend/pkg/cast/chain_ast.go` — the improved orphan-call repair message.
 

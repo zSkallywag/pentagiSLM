@@ -47,6 +47,10 @@ const (
 // still trustworthy.
 var ErrAgentModelCall = errors.New("agent model call failed")
 
+// ErrEmptyModelResponse is returned by fillResult when the model produces a
+// response with neither content nor tool calls (e.g. truncation at 'length').
+var ErrEmptyModelResponse = errors.New("no content and tool calls in response")
+
 type callResult struct {
 	streamID  int64
 	funcCalls []llms.ToolCall
@@ -450,11 +454,16 @@ func (fp *flowProvider) callWithRetries(
 	executionContext string,
 ) (*callResult, error) {
 	var (
-		err     error
-		errs    []error
-		msgType = database.MsglogTypeAnswer
-		resp    *llms.ContentResponse
-		result  callResult
+		err                error
+		errs               []error
+		msgType            = database.MsglogTypeAnswer
+		resp               *llms.ContentResponse
+		result             callResult
+		lastStopReason     string
+		accumulatedContent string
+		continuationsUsed  int
+		workChain          []llms.MessageContent // nil until first continuation; then slices.Clone(chain), diverged locally
+		tailStart          int                   // len(workChain) right after clone; continuation tail rebuilds from here
 	)
 
 	logger := logrus.WithContext(ctx).WithFields(enrichLogrusFields(fp.flowID, taskID, subtaskID, logrus.Fields{
@@ -522,9 +531,11 @@ func (fp *flowProvider) callWithRetries(
 			result.content, result.funcCalls = fp.smallModelRecoverToolCalls(logger, result.content, executor)
 		}
 		if strings.Trim(result.content, "' \"\n\r\t") == "" && len(result.funcCalls) == 0 {
-			return fmt.Errorf("no content and tool calls in response: stop reason '%s'", stopReason)
+			lastStopReason = stopReason
+			return fmt.Errorf("%w: stop reason '%s'", ErrEmptyModelResponse, stopReason)
 		}
 
+		lastStopReason = stopReason
 		return nil
 	}
 
@@ -579,7 +590,11 @@ func (fp *flowProvider) callWithRetries(
 			}
 		}
 
-		resp, err = fp.CallWithTools(ctx, optAgentType, chain, executor.Tools(), streamCb)
+		useChain := workChain
+		if useChain == nil {
+			useChain = chain
+		}
+		resp, err = fp.CallWithTools(ctx, optAgentType, useChain, executor.Tools(), streamCb)
 		if err != nil {
 			err = fmt.Errorf("%w: %w", ErrAgentModelCall, err)
 		}
@@ -592,32 +607,79 @@ func (fp *flowProvider) callWithRetries(
 				err = fmt.Errorf("%w: %w", ErrAgentModelCall, err)
 			}
 		}
-		if err == nil {
-			break
-		} else {
-			errs = append(errs, err)
 
-			// Saying "will retry" for a call the loop is about to abandon is
-			// what makes this line unreadable in a log. The wrapped ctx.Err() is
-			// the same error the select below would return one statement later,
-			// which matters: the provider replaces a cancellation with a bare
-			// message of its own, and the controllers that unwind a stopped flow
-			// test for context.Canceled with errors.Is.
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, fmt.Errorf("context canceled while waiting for retry: %w", ctxErr)
+		// T1 trigger — covers BOTH: fillResult success (partial content, no calls) AND the empty-response error.
+		isTruncation := (err == nil || errors.Is(err, ErrEmptyModelResponse)) && strings.EqualFold(lastStopReason, "length")
+		if isTruncation && fp.smallModelEnabled() && fp.cfg.SmallModelMaxContinuations > 0 &&
+			continuationsUsed < fp.cfg.SmallModelMaxContinuations {
+
+			if result.content != "" {
+				if accumulatedContent != "" {
+					accumulatedContent += "\n"
+				}
+				accumulatedContent += result.content
 			}
+			if workChain == nil {
+				workChain = slices.Clone(chain)
+				tailStart = len(workChain)
+			}
+			workChain = workChain[:tailStart] // rebuild continuation tail — no stale AI msgs / no duplicated directives
+			if accumulatedContent != "" {
+				workChain = append(workChain, llms.TextParts(llms.ChatMessageTypeAI, accumulatedContent))
+			}
+			workChain = append(workChain, llms.TextParts(llms.ChatMessageTypeHuman,
+				"Continue your previous answer from where it stopped. Do not repeat content you have already provided."))
+			continuationsUsed++
 
+			stopReasonForLog := lastStopReason
 			logger.WithFields(logrus.Fields{
-				"retry_iteration": idx,
-				"error":           err.Error()[:min(200, len(err.Error()))],
-			}).Warn("agent chain call failed, will retry")
+				"continuation_iteration": continuationsUsed,
+				"stop_reason":            stopReasonForLog,
+				"accumulated_bytes":      len(accumulatedContent),
+			}).Info("model response truncated, issuing continuation")
+
+			result = callResult{}
+			lastStopReason = ""
+			continue // IMMEDIATE re-issue at loop top — no 5s backoff, one model call per slot, NO inner CallWithTools
 		}
+
+		if err == nil {
+			break // success (or exhausted budget with content banked)
+		}
+
+		errs = append(errs, err)
+
+		// Saying "will retry" for a call the loop is about to abandon is
+		// what makes this line unreadable in a log. The wrapped ctx.Err() is
+		// the same error the select below would return one statement later,
+		// which matters: the provider replaces a cancellation with a bare
+		// message of its own, and the controllers that unwind a stopped flow
+		// test for context.Canceled with errors.Is.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("context canceled while waiting for retry: %w", ctxErr)
+		}
+
+		logger.WithFields(logrus.Fields{
+			"retry_iteration": idx,
+			"error":           err.Error()[:min(200, len(err.Error()))],
+		}).Warn("agent chain call failed, will retry")
 
 		ticker.Reset(delayBetweenRetries)
 		select {
 		case <-ticker.C:
 		case <-ctx.Done():
 			return nil, fmt.Errorf("context canceled while waiting for retry: %w", ctx.Err())
+		}
+	}
+
+	// Accumulate all partial pieces into result.content so the caller gets
+	// the complete response even if it was delivered across multiple continuation
+	// attempts.
+	if accumulatedContent != "" {
+		if result.content != "" {
+			result.content = accumulatedContent + "\n" + result.content
+		} else {
+			result.content = accumulatedContent
 		}
 	}
 
