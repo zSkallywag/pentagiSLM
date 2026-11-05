@@ -1,5 +1,5 @@
 simple:
-  temperature: 1.0
+  temperature: 0.2
   top_p: 0.9
   n: 1
   max_tokens: 8192

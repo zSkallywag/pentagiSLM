@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/vxcontrol/langchaingo/llms"
 
 	"pentagi/pkg/cast"
+	"pentagi/pkg/csum"
+	"pentagi/pkg/providers/pconfig"
+	"pentagi/pkg/providers/provider"
 	"pentagi/pkg/smallmodel"
 	"pentagi/pkg/templates"
 	"pentagi/pkg/tools"
@@ -93,13 +97,43 @@ func (fp *flowProvider) smallModelRecoverToolCalls(
 	return rest, calls
 }
 
-// smallModelBudget builds the token budget from config.
-func (fp *flowProvider) smallModelBudget() smallmodel.Budget {
+// smallModelBudget builds the token budget for the role opt. The window is the
+// one the role's model is served with when the provider reports it, so a role on
+// a small local model compacts at that model's ceiling while a role on a large
+// cloud model keeps its context; SMALL_MODEL_CTX_WINDOW covers a model whose
+// window is unknown. The answer the role asks for and the tool schemas it sends
+// share the window with the chain, so their room is reserved.
+func (fp *flowProvider) smallModelBudget(opt pconfig.ProviderOptionsType, schemas []llms.Tool) smallmodel.Budget {
+	window := fp.cfg.SmallModelCtxWindow
+	if fp.Provider != nil {
+		if limits := provider.ModelLimitsFor(fp.Provider, opt); limits.ContextWindow != nil && *limits.ContextWindow > 0 {
+			window = *limits.ContextWindow
+		}
+	}
+
 	return smallmodel.Budget{
-		CtxWindow:     fp.cfg.SmallModelCtxWindow,
+		CtxWindow:     window,
 		Percent:       fp.cfg.SmallModelCtxBudgetPercent,
 		BytesPerToken: fp.cfg.SmallModelBytesPerToken,
+		ReserveTokens: fp.smallModelAnswerTokens(opt) +
+			smallmodel.EstimateToolTokens(schemas, fp.cfg.SmallModelBytesPerToken),
 	}
+}
+
+// smallModelAnswerTokens is the max_tokens a call for opt carries, the provider
+// defaults included, or zero when none is set.
+func (fp *flowProvider) smallModelAnswerTokens(opt pconfig.ProviderOptionsType) int {
+	if fp.Provider == nil {
+		return 0
+	}
+	var applied llms.CallOptions
+	for _, option := range fp.GetProviderConfig().GetOptionsForType(opt) {
+		option(&applied)
+	}
+	if applied.MaxTokens == nil || *applied.MaxTokens < 0 {
+		return 0
+	}
+	return *applied.MaxTokens
 }
 
 // sanitizeToolArgs repairs malformed JSON arguments from a small model before
@@ -357,23 +391,120 @@ func (fp *flowProvider) smallModelFewshotBlock(query string) string {
 	return set.Block(query, fp.cfg.SmallModelFewshotK)
 }
 
-// smallModelCompactIfOverBudget compacts the chain when it exceeds the token
-// budget, independently of the summarizer's own byte thresholds. It returns the
-// chain unchanged on any error so it can never make the chain worse.
+const (
+	// smallModelCompactionAttempts is how many summarizer failures a compaction
+	// tolerates before it drops old steps without the model.
+	smallModelCompactionAttempts   = 3
+	smallModelCompactionRetryDelay = time.Second
+	// smallModelCompactionLevels is how many ever tighter passes a compaction
+	// makes while the summarized chain is still over budget.
+	smallModelCompactionLevels = 3
+)
+
+// smallModelDroppedSteps stands in for the summary of old steps when the
+// summarizer stays down; the state block keeps the facts those steps produced.
+const smallModelDroppedSteps = "Earlier steps were removed to fit the context window because the " +
+	"summarizer was unavailable. The CURRENT STATE block carries the facts they produced."
+
+// smallModelCompactIfOverBudget compacts the chain of role opt when it exceeds
+// that role's token budget. The summarizer is sized to the budget rather than to
+// the global SUMMARIZER_* thresholds, which know nothing of the role's window and
+// can leave a compacted chain still too large for it.
+//
+// A chain known to be over budget is not sent as is. A pass that leaves it over
+// budget is followed by a tighter one; a failing summarizer is retried with
+// backoff, and when it stays down the old steps are dropped without the model.
+// Only a cancelled context returns the chain unchanged.
 func (fp *flowProvider) smallModelCompactIfOverBudget(
 	ctx context.Context,
+	opt pconfig.ProviderOptionsType,
 	handler tools.SummarizeHandler,
 	chain []llms.MessageContent,
+	schemas []llms.Tool,
 ) ([]llms.MessageContent, bool) {
 	if !fp.smallModelEnabled() || fp.summarizer == nil {
 		return chain, false
 	}
-	if !fp.smallModelBudget().Exceeded(chain) {
+	budget := fp.smallModelBudget(opt, schemas)
+	if !budget.Exceeded(chain) {
 		return chain, false
 	}
-	compacted, err := fp.summarizer.SummarizeChain(ctx, handler, chain, fp.tcIDTemplate)
+
+	logger := logrus.WithContext(ctx).WithFields(logrus.Fields{
+		"agent":        string(opt),
+		"token_limit":  budget.TokenLimit(),
+		"chain_tokens": budget.Tokens(chain),
+	})
+	current, changed := chain, false
+	for level, failures := 1, 0; level <= smallModelCompactionLevels; {
+		compacted, err := smallModelBudgetSummarizer(budget, level).SummarizeChain(ctx, handler, current, fp.tcIDTemplate)
+		if err != nil {
+			if ctx.Err() != nil {
+				return chain, false
+			}
+			failures++
+			logger.WithError(err).WithField("attempt", failures).Warn("small-model compaction failed")
+			if failures == smallModelCompactionAttempts {
+				break
+			}
+			if !smallModelWait(ctx, smallModelCompactionRetryDelay*time.Duration(failures)) {
+				return chain, false
+			}
+			continue
+		}
+
+		current, changed = compacted, true
+		if !budget.Exceeded(current) {
+			return current, true
+		}
+		level++
+	}
+
+	dropOldSteps := func(context.Context, string) (string, error) { return smallModelDroppedSteps, nil }
+	dropped, err := smallModelBudgetSummarizer(budget, smallModelCompactionLevels).
+		SummarizeChain(ctx, dropOldSteps, current, fp.tcIDTemplate)
 	if err != nil {
+		if changed {
+			return current, true
+		}
+		logger.WithError(err).Error("small-model compaction failed, sending the chain uncompacted")
 		return chain, false
 	}
-	return compacted, true
+	if budget.Exceeded(dropped) {
+		logger.Warn("chain is still over budget after compaction; the provider lowers the answer to the room left")
+	}
+	return dropped, true
+}
+
+// smallModelBudgetSummarizer sizes a summarizer to the budget, a level-th of it at
+// level > 1. The first level keeps the human messages of summarized sections
+// verbatim; that can leave the chain over budget when they are large (a long
+// task scope), so the tighter levels summarize them too.
+func smallModelBudgetSummarizer(budget smallmodel.Budget, level int) csum.Summarizer {
+	bytesPerToken := budget.BytesPerToken
+	if bytesPerToken <= 0 {
+		bytesPerToken = 3
+	}
+	target := budget.TokenLimit() * bytesPerToken / max(level, 1)
+
+	return csum.NewSummarizer(csum.SummarizerConfig{
+		PreserveLast:   true,
+		UseQA:          true,
+		SummHumanInQA:  level > 1,
+		LastSecBytes:   target / 2,
+		MaxBPBytes:     target / 4,
+		MaxQABytes:     target,
+		KeepQASections: 1,
+	})
+}
+
+func smallModelWait(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
