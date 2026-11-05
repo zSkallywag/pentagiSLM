@@ -10,6 +10,9 @@ import (
 	"github.com/vxcontrol/langchaingo/llms"
 
 	"pentagi/pkg/cast"
+	"pentagi/pkg/csum"
+	"pentagi/pkg/providers/pconfig"
+	"pentagi/pkg/providers/provider"
 	"pentagi/pkg/smallmodel"
 	"pentagi/pkg/templates"
 	"pentagi/pkg/tools"
@@ -93,13 +96,43 @@ func (fp *flowProvider) smallModelRecoverToolCalls(
 	return rest, calls
 }
 
-// smallModelBudget builds the token budget from config.
-func (fp *flowProvider) smallModelBudget() smallmodel.Budget {
+// smallModelBudget builds the token budget for the role opt. The window is the
+// one the role's model is served with when the provider reports it, so a role on
+// a small local model compacts at that model's ceiling while a role on a large
+// cloud model keeps its context; SMALL_MODEL_CTX_WINDOW covers a model whose
+// window is unknown. The answer the role asks for and the tool schemas it sends
+// share the window with the chain, so their room is reserved.
+func (fp *flowProvider) smallModelBudget(opt pconfig.ProviderOptionsType, schemas []llms.Tool) smallmodel.Budget {
+	window := fp.cfg.SmallModelCtxWindow
+	if fp.Provider != nil {
+		if limits := provider.ModelLimitsFor(fp.Provider, opt); limits.ContextWindow != nil && *limits.ContextWindow > 0 {
+			window = *limits.ContextWindow
+		}
+	}
+
 	return smallmodel.Budget{
-		CtxWindow:     fp.cfg.SmallModelCtxWindow,
+		CtxWindow:     window,
 		Percent:       fp.cfg.SmallModelCtxBudgetPercent,
 		BytesPerToken: fp.cfg.SmallModelBytesPerToken,
+		ReserveTokens: fp.smallModelAnswerTokens(opt) +
+			smallmodel.EstimateToolTokens(schemas, fp.cfg.SmallModelBytesPerToken),
 	}
+}
+
+// smallModelAnswerTokens is the max_tokens a call for opt carries, the provider
+// defaults included, or zero when none is set.
+func (fp *flowProvider) smallModelAnswerTokens(opt pconfig.ProviderOptionsType) int {
+	if fp.Provider == nil {
+		return 0
+	}
+	var applied llms.CallOptions
+	for _, option := range fp.GetProviderConfig().GetOptionsForType(opt) {
+		option(&applied)
+	}
+	if applied.MaxTokens == nil || *applied.MaxTokens < 0 {
+		return 0
+	}
+	return *applied.MaxTokens
 }
 
 // sanitizeToolArgs repairs malformed JSON arguments from a small model before
@@ -357,22 +390,45 @@ func (fp *flowProvider) smallModelFewshotBlock(query string) string {
 	return set.Block(query, fp.cfg.SmallModelFewshotK)
 }
 
-// smallModelCompactIfOverBudget compacts the chain when it exceeds the token
-// budget, independently of the summarizer's own byte thresholds. It returns the
-// chain unchanged on any error so it can never make the chain worse.
+// smallModelCompactIfOverBudget compacts the chain of role opt when it exceeds
+// that role's token budget. The summarizer is sized to the budget rather than to
+// the global SUMMARIZER_* thresholds, which know nothing of the role's window and
+// can leave a compacted chain still too large for it. It returns the chain
+// unchanged on any error so it can never make the chain worse.
 func (fp *flowProvider) smallModelCompactIfOverBudget(
 	ctx context.Context,
+	opt pconfig.ProviderOptionsType,
 	handler tools.SummarizeHandler,
 	chain []llms.MessageContent,
+	schemas []llms.Tool,
 ) ([]llms.MessageContent, bool) {
 	if !fp.smallModelEnabled() || fp.summarizer == nil {
 		return chain, false
 	}
-	if !fp.smallModelBudget().Exceeded(chain) {
+	budget := fp.smallModelBudget(opt, schemas)
+	if !budget.Exceeded(chain) {
 		return chain, false
 	}
-	compacted, err := fp.summarizer.SummarizeChain(ctx, handler, chain, fp.tcIDTemplate)
+
+	bytesPerToken := budget.BytesPerToken
+	if bytesPerToken <= 0 {
+		bytesPerToken = 3
+	}
+	target := budget.TokenLimit() * bytesPerToken
+	compacted, err := csum.NewSummarizer(csum.SummarizerConfig{
+		PreserveLast:   true,
+		UseQA:          true,
+		LastSecBytes:   target / 2,
+		MaxBPBytes:     target / 4,
+		MaxQABytes:     target,
+		KeepQASections: 1,
+	}).SummarizeChain(ctx, handler, chain, fp.tcIDTemplate)
 	if err != nil {
+		logrus.WithContext(ctx).WithError(err).WithFields(logrus.Fields{
+			"agent":        string(opt),
+			"token_limit":  budget.TokenLimit(),
+			"chain_tokens": budget.Tokens(chain),
+		}).Warn("small-model compaction failed, sending the chain uncompacted")
 		return chain, false
 	}
 	return compacted, true

@@ -95,7 +95,7 @@ PENTAGI_IMAGE=local/pentagi:slm
 
 # Small-model mode
 SMALL_MODEL_MODE=true
-SMALL_MODEL_CTX_WINDOW=32768            # the real context window of your model
+SMALL_MODEL_CTX_WINDOW=32768            # fallback window for a model whose window is unknown
 SMALL_MODEL_SCOPE=10.0.0.5/32           # authorized targets: IPs, CIDRs, hostnames
 
 # Your local model
@@ -168,7 +168,7 @@ All variables are already wired through `docker-compose.yml` and listed in `.env
 | Variable | Default | What it does |
 |---|---|---|
 | `SMALL_MODEL_MODE` | `false` | Master switch. When off, nothing below has any effect. |
-| `SMALL_MODEL_CTX_WINDOW` | `32768` | Declared context window of your model, in tokens. |
+| `SMALL_MODEL_CTX_WINDOW` | `32768` | Context window, in tokens, for a model whose window the provider does not report. Ollama models report the context they are loaded with, so each role is budgeted against its own model's window. |
 | `SMALL_MODEL_CTX_BUDGET_PERCENT` | `40` | Compact the chain when the prompt exceeds this share of the window. |
 | `SMALL_MODEL_BYTES_PER_TOKEN` | `3` | Conservative bytes-per-token estimate used to count tokens. |
 | `SMALL_MODEL_TOOL_OUTPUT_MAX_BYTES` | `6144` | Maximum tool output that enters the chain after compaction. |

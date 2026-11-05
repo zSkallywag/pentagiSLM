@@ -188,6 +188,9 @@ type ollamaProvider struct {
 	models         pconfig.ModelsConfig
 	providerName   provider.ProviderName
 	providerConfig *pconfig.ProviderConfig
+	// windows is set only in small-model mode, so with the flag off every
+	// Ollama model keeps the unknown window it has upstream.
+	windows *windowResolver
 }
 
 func New(
@@ -252,12 +255,18 @@ func New(
 		availableModels = catalogFromConfig(baseModel, serverURL, providerConfig)
 	}
 
+	var windows *windowResolver
+	if cfg.SmallModelMode {
+		windows = newWindowResolver(apiClient, getConfigModelsList(baseModel, providerConfig))
+	}
+
 	return &ollamaProvider{
 		llm:            client,
 		model:          baseModel,
 		models:         availableModels,
 		providerName:   providerName,
 		providerConfig: providerConfig,
+		windows:        windows,
 	}, nil
 }
 
@@ -297,6 +306,9 @@ func (p *ollamaProvider) GetPriceInfo(opt pconfig.ProviderOptionsType) *pconfig.
 }
 
 func (p *ollamaProvider) GetModels() pconfig.ModelsConfig {
+	if p.windows != nil {
+		return p.windows.apply(p.models)
+	}
 	return p.models
 }
 

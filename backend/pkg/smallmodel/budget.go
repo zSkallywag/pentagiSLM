@@ -10,6 +10,8 @@
 package smallmodel
 
 import (
+	"encoding/json"
+
 	"github.com/vxcontrol/langchaingo/llms"
 
 	"pentagi/pkg/cast"
@@ -19,7 +21,7 @@ import (
 // small model degrades sharply past a fraction of its declared window, so the
 // trigger is a token budget, not the raw byte thresholds the summarizer uses.
 type Budget struct {
-	// CtxWindow is the model's declared context window in tokens.
+	// CtxWindow is the context window, in tokens, of the model the chain is sent to.
 	CtxWindow int
 	// Percent is the share of the window a chain may fill before compaction.
 	Percent int
@@ -30,11 +32,41 @@ type Budget struct {
 	// CountTokens, when set, measures a chain exactly (e.g. via the local model
 	// server's tokenizer) and is preferred over the byte estimate.
 	CountTokens func([]llms.MessageContent) (int, error)
+	// ReserveTokens is the part of the window the chain cannot use: the answer
+	// the call asks for and the tool schemas it carries share the window with
+	// the prompt. Zero reserves nothing.
+	ReserveTokens int
 }
 
-// TokenLimit is the token count at which a chain must be compacted.
+// TokenLimit is the token count at which a chain must be compacted: the
+// configured share of the window, lowered to what the reserve leaves free. A
+// reserve that fills the whole window is ignored rather than forcing a limit of
+// zero; the provider then lowers the answer to the room the prompt leaves.
 func (b Budget) TokenLimit() int {
-	return b.CtxWindow * b.Percent / 100
+	limit := b.CtxWindow * b.Percent / 100
+	if b.ReserveTokens <= 0 {
+		return limit
+	}
+	if room := b.CtxWindow - b.ReserveTokens; room > 0 && room < limit {
+		return room
+	}
+	return limit
+}
+
+// EstimateToolTokens estimates the tokens the tool schemas of a call take, using
+// the same bytes-per-token divisor as the chain estimate.
+func EstimateToolTokens(tools []llms.Tool, bytesPerToken int) int {
+	if len(tools) == 0 {
+		return 0
+	}
+	if bytesPerToken <= 0 {
+		bytesPerToken = 3
+	}
+	schemas, err := json.Marshal(tools)
+	if err != nil {
+		return 0
+	}
+	return len(schemas) / bytesPerToken
 }
 
 // Tokens returns the estimated or measured token count of a chain. It falls

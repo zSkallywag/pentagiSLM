@@ -139,7 +139,9 @@ func (fp *flowProvider) performAgentChain(
 				),
 			}
 		} else {
-			if compacted, done := fp.smallModelCompactIfOverBudget(ctx, summarizerHandler, chain); done {
+			if compacted, done := fp.smallModelCompactIfOverBudget(
+				ctx, optAgentType, summarizerHandler, chain, executor.Tools(),
+			); done {
 				chain = compacted
 				if err := fp.updateMsgChain(ctx, optAgentType, chainID, chain, rollLastUpdateTime()); err != nil {
 					obs.LogErrorOrCancel(logger, err, "failed to update msg chain")
