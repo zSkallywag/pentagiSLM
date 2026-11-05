@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/vxcontrol/langchaingo/llms"
@@ -390,11 +391,30 @@ func (fp *flowProvider) smallModelFewshotBlock(query string) string {
 	return set.Block(query, fp.cfg.SmallModelFewshotK)
 }
 
+const (
+	// smallModelCompactionAttempts is how many summarizer failures a compaction
+	// tolerates before it drops old steps without the model.
+	smallModelCompactionAttempts   = 3
+	smallModelCompactionRetryDelay = time.Second
+	// smallModelCompactionLevels is how many ever tighter passes a compaction
+	// makes while the summarized chain is still over budget.
+	smallModelCompactionLevels = 3
+)
+
+// smallModelDroppedSteps stands in for the summary of old steps when the
+// summarizer stays down; the state block keeps the facts those steps produced.
+const smallModelDroppedSteps = "Earlier steps were removed to fit the context window because the " +
+	"summarizer was unavailable. The CURRENT STATE block carries the facts they produced."
+
 // smallModelCompactIfOverBudget compacts the chain of role opt when it exceeds
 // that role's token budget. The summarizer is sized to the budget rather than to
 // the global SUMMARIZER_* thresholds, which know nothing of the role's window and
-// can leave a compacted chain still too large for it. It returns the chain
-// unchanged on any error so it can never make the chain worse.
+// can leave a compacted chain still too large for it.
+//
+// A chain known to be over budget is not sent as is. A pass that leaves it over
+// budget is followed by a tighter one; a failing summarizer is retried with
+// backoff, and when it stays down the old steps are dropped without the model.
+// Only a cancelled context returns the chain unchanged.
 func (fp *flowProvider) smallModelCompactIfOverBudget(
 	ctx context.Context,
 	opt pconfig.ProviderOptionsType,
@@ -410,26 +430,81 @@ func (fp *flowProvider) smallModelCompactIfOverBudget(
 		return chain, false
 	}
 
+	logger := logrus.WithContext(ctx).WithFields(logrus.Fields{
+		"agent":        string(opt),
+		"token_limit":  budget.TokenLimit(),
+		"chain_tokens": budget.Tokens(chain),
+	})
+	current, changed := chain, false
+	for level, failures := 1, 0; level <= smallModelCompactionLevels; {
+		compacted, err := smallModelBudgetSummarizer(budget, level).SummarizeChain(ctx, handler, current, fp.tcIDTemplate)
+		if err != nil {
+			if ctx.Err() != nil {
+				return chain, false
+			}
+			failures++
+			logger.WithError(err).WithField("attempt", failures).Warn("small-model compaction failed")
+			if failures == smallModelCompactionAttempts {
+				break
+			}
+			if !smallModelWait(ctx, smallModelCompactionRetryDelay*time.Duration(failures)) {
+				return chain, false
+			}
+			continue
+		}
+
+		current, changed = compacted, true
+		if !budget.Exceeded(current) {
+			return current, true
+		}
+		level++
+	}
+
+	dropOldSteps := func(context.Context, string) (string, error) { return smallModelDroppedSteps, nil }
+	dropped, err := smallModelBudgetSummarizer(budget, smallModelCompactionLevels).
+		SummarizeChain(ctx, dropOldSteps, current, fp.tcIDTemplate)
+	if err != nil {
+		if changed {
+			return current, true
+		}
+		logger.WithError(err).Error("small-model compaction failed, sending the chain uncompacted")
+		return chain, false
+	}
+	if budget.Exceeded(dropped) {
+		logger.Warn("chain is still over budget after compaction; the provider lowers the answer to the room left")
+	}
+	return dropped, true
+}
+
+// smallModelBudgetSummarizer sizes a summarizer to the budget, a level-th of it at
+// level > 1. The first level keeps the human messages of summarized sections
+// verbatim; that can leave the chain over budget when they are large (a long
+// task scope), so the tighter levels summarize them too.
+func smallModelBudgetSummarizer(budget smallmodel.Budget, level int) csum.Summarizer {
 	bytesPerToken := budget.BytesPerToken
 	if bytesPerToken <= 0 {
 		bytesPerToken = 3
 	}
-	target := budget.TokenLimit() * bytesPerToken
-	compacted, err := csum.NewSummarizer(csum.SummarizerConfig{
+	target := budget.TokenLimit() * bytesPerToken / max(level, 1)
+
+	return csum.NewSummarizer(csum.SummarizerConfig{
 		PreserveLast:   true,
 		UseQA:          true,
+		SummHumanInQA:  level > 1,
 		LastSecBytes:   target / 2,
 		MaxBPBytes:     target / 4,
 		MaxQABytes:     target,
 		KeepQASections: 1,
-	}).SummarizeChain(ctx, handler, chain, fp.tcIDTemplate)
-	if err != nil {
-		logrus.WithContext(ctx).WithError(err).WithFields(logrus.Fields{
-			"agent":        string(opt),
-			"token_limit":  budget.TokenLimit(),
-			"chain_tokens": budget.Tokens(chain),
-		}).Warn("small-model compaction failed, sending the chain uncompacted")
-		return chain, false
+	})
+}
+
+func smallModelWait(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
-	return compacted, true
 }
