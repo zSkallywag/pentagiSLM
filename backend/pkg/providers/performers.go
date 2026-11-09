@@ -893,6 +893,7 @@ func (fp *flowProvider) performMentor(
 	executor tools.ContextToolsExecutor,
 	lastToolCall llms.ToolCall,
 	lastToolResult string,
+	extraQuestion string,
 ) (string, error) {
 	ctx, span := obs.Observer.NewSpan(ctx, obs.SpanKindInternal, "providers.flowProvider.performMentor")
 	defer span.End()
@@ -945,6 +946,9 @@ func (fp *flowProvider) performMentor(
 	question, err := fp.prompter.RenderTemplate(templates.PromptTypeQuestionExecutionMonitor, questionData)
 	if err != nil {
 		return "", fmt.Errorf("failed to render execution monitor question: %w", err)
+	}
+	if extraQuestion != "" {
+		question += "\n\n" + extraQuestion
 	}
 
 	// 6. Call adviser handler with custom observation name "mentor"

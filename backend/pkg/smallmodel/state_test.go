@@ -109,6 +109,50 @@ func TestStore_AddFacts_DoesNotCountAnotherHostInAKnownNetAsProgress(t *testing.
 	assert.Equal(t, 0, since, "a new fact of another kind is progress beside a host that is not")
 }
 
+func TestStore_DueCheckpoint_ReviewsEachCheckpointOnce(t *testing.T) {
+	st := NewStore()
+	advance := func(subtaskID int64, to int) {
+		for st.SubtaskCommands(subtaskID) < to {
+			st.IncrSubtaskCommands(subtaskID)
+		}
+	}
+	due := func(subtaskID int64) int {
+		percent, ok := st.DueCheckpoint(subtaskID, 10)
+		if !ok {
+			return 0
+		}
+		return percent
+	}
+
+	advance(7, 3)
+	assert.Equal(t, 0, due(7), "below the first checkpoint")
+	advance(7, 4)
+	assert.Equal(t, 40, due(7))
+	assert.Equal(t, 0, due(7), "a checkpoint is reviewed once")
+	advance(7, 7)
+	assert.Equal(t, 0, due(7))
+	advance(7, 8)
+	assert.Equal(t, 75, due(7))
+	advance(7, 10)
+	assert.Equal(t, 0, due(7), "there is no checkpoint at the cap itself")
+
+	advance(8, 9)
+	assert.Equal(t, 75, due(8), "a subtask past both checkpoints is reviewed once, at the higher")
+	assert.Equal(t, 0, due(8))
+
+	_, ok := st.DueCheckpoint(7, 0)
+	assert.False(t, ok, "a subtask without a budget has no checkpoints")
+}
+
+func TestStore_CloseSubtaskBudget_ClosesOnlyThatSubtask(t *testing.T) {
+	st := NewStore()
+	assert.False(t, st.SubtaskBudgetClosed(7))
+
+	st.CloseSubtaskBudget(7)
+	assert.True(t, st.SubtaskBudgetClosed(7))
+	assert.False(t, st.SubtaskBudgetClosed(8))
+}
+
 func TestStore_RepeatedFailure_AnswersOnlyACallThatFailedTheSameWayTwice(t *testing.T) {
 	st := NewStore()
 	const call = "terminal\ninput: curl -X POST /api/v3/transform\n"

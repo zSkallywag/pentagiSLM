@@ -458,14 +458,21 @@ func (fp *flowProvider) execToolCall(
 
 	response = fp.compactToolResponse(ctx, funcName, response, taskID)
 
-	if monitor.shouldInvokeMentor(toolCall) && executor.IsFunctionExists(tools.AdviceToolName) {
+	if note, reviewed := fp.smallModelBudgetCheckpoint(
+		ctx, optAgentType, chainID, taskID, subtaskID, chain, executor, toolCall, response,
+	); reviewed {
+		// The checkpoint was the adviser's review of this call; the monitor's own
+		// review on the same call would only repeat it.
+		monitor.reset()
+		response = formatEnhancedToolResponse(response, note)
+	} else if monitor.shouldInvokeMentor(toolCall) && executor.IsFunctionExists(tools.AdviceToolName) {
 		logger.WithFields(logrus.Fields{
 			"same_tool_count":  monitor.sameToolCount,
 			"total_call_count": monitor.totalCallCount,
 		}).Debug("execution monitor threshold reached, invoking mentor for progress review")
 
 		mentorResponse, err := fp.performMentor(
-			ctx, optAgentType, chainID, taskID, subtaskID, chain, executor, toolCall, response,
+			ctx, optAgentType, chainID, taskID, subtaskID, chain, executor, toolCall, response, "",
 		)
 		if err != nil {
 			logger.WithError(err).Warn("failed to invoke execution mentor, continuing with normal execution")

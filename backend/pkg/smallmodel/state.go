@@ -100,6 +100,10 @@ type Store struct {
 	// failedCalls holds, per subtask id, the failed answers of calls keyed by the
 	// caller's canonical form of the call.
 	failedCalls map[int64]map[string]*callRecord
+	// checkpointsReached is the highest budget checkpoint reviewed per subtask id,
+	// and closedBudgets the subtasks a checkpoint verdict ended before their cap.
+	checkpointsReached map[int64]int
+	closedBudgets      map[int64]struct{}
 }
 
 // NewStore returns an empty Store.
@@ -109,6 +113,9 @@ func NewStore() *Store {
 		gateFired:   make(map[Key]struct{}),
 		subtaskCmds: make(map[int64]int),
 		failedCalls: make(map[int64]map[string]*callRecord),
+
+		checkpointsReached: make(map[int64]int),
+		closedBudgets:      make(map[int64]struct{}),
 	}
 }
 
@@ -255,6 +262,45 @@ func (st *Store) SubtaskCommands(subtaskID int64) int {
 	st.mu.RLock()
 	defer st.mu.RUnlock()
 	return st.subtaskCmds[subtaskID]
+}
+
+// DueCheckpoint returns the budget checkpoint a subtask has reached and not yet
+// been reviewed at, and marks it reviewed. A subtask that passed several since
+// the last call is reviewed once, at the highest of them.
+func (st *Store) DueCheckpoint(subtaskID int64, cap int) (int, bool) {
+	if cap <= 0 {
+		return 0, false
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	count, reached := st.subtaskCmds[subtaskID], st.checkpointsReached[subtaskID]
+	due := 0
+	for _, percent := range BudgetCheckpoints {
+		if percent > reached && count*100 >= percent*cap {
+			due = percent
+		}
+	}
+	if due == 0 {
+		return 0, false
+	}
+	st.checkpointsReached[subtaskID] = due
+	return due, true
+}
+
+// CloseSubtaskBudget ends a subtask's commands before its cap, on a checkpoint
+// verdict that it should report now.
+func (st *Store) CloseSubtaskBudget(subtaskID int64) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.closedBudgets[subtaskID] = struct{}{}
+}
+
+// SubtaskBudgetClosed reports whether a checkpoint verdict ended the subtask's commands.
+func (st *Store) SubtaskBudgetClosed(subtaskID int64) bool {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	_, closed := st.closedBudgets[subtaskID]
+	return closed
 }
 
 // RecordCallResult files the answer a call got in a subtask. call is the caller's

@@ -1023,6 +1023,107 @@ func TestPerformer_PerformAgentChain_CompactsAChainItsToolSchemasPushOutOfTheWin
 	}
 }
 
+// performerAdviserExecutor runs every terminal command fine, answers the adviser with answer and keeps its questions.
+type performerAdviserExecutor struct {
+	tools.ContextToolsExecutor
+
+	answer    string
+	questions []string
+}
+
+func (e *performerAdviserExecutor) Execute(
+	_ context.Context, _ int64, _, name, _, _ string, args json.RawMessage,
+) (string, error) {
+	if name != tools.AdviceToolName {
+		return "uid=0(root)\n[exit code: 0]", nil
+	}
+	var ask tools.AskAdvice
+	_ = json.Unmarshal(args, &ask)
+	e.questions = append(e.questions, ask.Question)
+
+	return e.answer, nil
+}
+
+func (*performerAdviserExecutor) IsFunctionExists(string) bool { return true }
+
+func (*performerAdviserExecutor) GetBarrierToolNames() []string {
+	return []string{tools.FinalyToolName}
+}
+
+func TestPerformer_ExecToolCall_AsksTheAdviserAtABudgetCheckpoint(t *testing.T) {
+	tests := []struct {
+		name       string
+		answer     string
+		wantNote   string
+		wantClosed bool
+	}{
+		{
+			name:       "a verdict to finish closes the subtask's commands",
+			answer:     "Nothing new in the last commands.\nVERDICT: FINISH",
+			wantNote:   "BUDGET CHECKPOINT (40%, verdict FINISH)",
+			wantClosed: true,
+		},
+		{
+			name:       "a declared blocker closes the subtask's commands",
+			answer:     "The endpoint rejects every shape.\n**VERDICT: BLOCKED**",
+			wantNote:   "BUDGET CHECKPOINT (40%, verdict BLOCKED)",
+			wantClosed: true,
+		},
+		{
+			name:     "a verdict to continue keeps them",
+			answer:   "Send listings as objects.\nVERDICT: CONTINUE",
+			wantNote: "BUDGET CHECKPOINT (40%, verdict CONTINUE)",
+		},
+		{
+			name:     "an answer without a verdict keeps them",
+			answer:   "Try harder.",
+			wantNote: "BUDGET CHECKPOINT (40%, verdict CONTINUE)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fp := newFlowProvider()
+			fp.Provider = mock.NewProvider(provider.ProviderOpenAI, "openai", "gpt-5.6-sol")
+			fp.db = &performerScopeQuerier{}
+			fp.prompter = templates.NewDefaultPrompter()
+			fp.cfg.SmallModelMode = true
+			fp.cfg.SmallModelVerifierEnabled = true
+			fp.cfg.SmallModelSubtaskMaxCommands = 10
+			taskID, subtaskID := int64(9), int64(152)
+			for range 3 {
+				fp.smallModelState().IncrSubtaskCommands(subtaskID)
+			}
+
+			executor := &performerAdviserExecutor{answer: tt.answer}
+			run := func(input string) string {
+				answer, err := fp.execToolCall(
+					context.Background(), pconfig.OptionsTypePentester, 1, 0, performerTerminalCall(input),
+					&executionMonitor{}, &repeatingDetector{}, executor, &taskID, &subtaskID, windowCompactionChain(1, 10),
+				)
+				require.NoError(t, err)
+				return answer
+			}
+
+			answer := run("id")
+			require.Len(t, executor.questions, 1, "the fourth of ten commands reaches the 40% checkpoint")
+			assert.Contains(t, executor.questions[0], "BUDGET CHECKPOINT: this subtask has used 40% of its command budget (4 of 10")
+			assert.Contains(t, answer, "uid=0(root)", "the command's own answer is kept")
+			assert.Contains(t, answer, tt.wantNote)
+
+			_, closed := fp.smallModelSubtaskBudgetSpent(&subtaskID)
+			assert.Equal(t, tt.wantClosed, closed)
+			assert.Equal(t, !tt.wantClosed, fp.smallModelExecutorFor(executor, &subtaskID).IsFunctionExists(tools.TerminalToolName),
+				"a closed subtask is offered no command tools from the next turn")
+
+			if !tt.wantClosed {
+				run("whoami")
+				assert.Len(t, executor.questions, 1, "a checkpoint already reviewed is not asked again")
+			}
+		})
+	}
+}
+
 // performerOfferedProvider records the names of the tools the agent's call carried and refuses the call.
 type performerOfferedProvider struct {
 	*mock.Provider

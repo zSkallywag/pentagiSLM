@@ -217,16 +217,74 @@ func (fp *flowProvider) verifyToolCall(funcName string, funcArgs json.RawMessage
 	return "", false
 }
 
+// smallModelSubtaskBudgeted reports whether the subtask runs under a command budget.
+func (fp *flowProvider) smallModelSubtaskBudgeted(subtaskID *int64) bool {
+	return fp.smallModelEnabled() && fp.cfg.SmallModelVerifierEnabled &&
+		subtaskID != nil && fp.cfg.SmallModelSubtaskMaxCommands > 0
+}
+
 // smallModelSubtaskBudgetSpent reports the terminal commands a subtask has run and
-// whether that has reached its budget, the point from which commands are refused
-// and the agent is left only the tools to finish with.
+// whether its budget is spent — by reaching the cap, or by a checkpoint verdict
+// that it should report now — the point from which commands are refused and the
+// agent is left only the tools to finish with.
 func (fp *flowProvider) smallModelSubtaskBudgetSpent(subtaskID *int64) (int, bool) {
-	if !fp.smallModelEnabled() || !fp.cfg.SmallModelVerifierEnabled ||
-		subtaskID == nil || fp.cfg.SmallModelSubtaskMaxCommands <= 0 {
+	if !fp.smallModelSubtaskBudgeted(subtaskID) {
 		return 0, false
 	}
 	n := fp.smallModelState().SubtaskCommands(*subtaskID)
-	return n, n >= fp.cfg.SmallModelSubtaskMaxCommands
+	return n, n >= fp.cfg.SmallModelSubtaskMaxCommands || fp.smallModelState().SubtaskBudgetClosed(*subtaskID)
+}
+
+// smallModelBudgetCheckpoint has the adviser review the subtask when the terminal
+// command just run reached a budget checkpoint, and returns the note to append to
+// that command's answer. A verdict to finish or a declared blocker closes the
+// subtask's budget, so from the next turn the agent is offered only the tools to
+// finish with: the review binds through what the agent can call, not through
+// what it is told.
+func (fp *flowProvider) smallModelBudgetCheckpoint(
+	ctx context.Context,
+	opt pconfig.ProviderOptionsType,
+	chainID int64,
+	taskID, subtaskID *int64,
+	chain []llms.MessageContent,
+	executor tools.ContextToolsExecutor,
+	toolCall llms.ToolCall,
+	response string,
+) (string, bool) {
+	if toolCall.FunctionCall == nil || toolCall.FunctionCall.Name != tools.TerminalToolName ||
+		!fp.smallModelSubtaskBudgeted(subtaskID) || !executor.IsFunctionExists(tools.AdviceToolName) {
+		return "", false
+	}
+	limit := fp.cfg.SmallModelSubtaskMaxCommands
+	percent, due := fp.smallModelState().DueCheckpoint(*subtaskID, limit)
+	if !due {
+		return "", false
+	}
+
+	logger := logrus.WithContext(ctx).WithFields(logrus.Fields{
+		"flow": fp.flowID, "subtask": *subtaskID, "checkpoint": percent, "agent": string(opt),
+	})
+	count := fp.smallModelState().SubtaskCommands(*subtaskID)
+	advice, err := fp.performMentor(
+		ctx, opt, chainID, taskID, subtaskID, chain, executor, toolCall, response,
+		smallmodel.CheckpointQuestion(percent, count, limit),
+	)
+	if err != nil {
+		logger.WithError(err).Warn("small-model budget checkpoint could not ask the adviser, continuing")
+		return "", false
+	}
+
+	verdict, ok := smallmodel.ParseCheckpointVerdict(advice)
+	if !ok {
+		logger.Warn("small-model budget checkpoint answer has no verdict, the subtask continues")
+		verdict = smallmodel.CheckpointContinue
+	}
+	if verdict.Closes() {
+		fp.smallModelState().CloseSubtaskBudget(*subtaskID)
+	}
+	logger.WithField("verdict", verdict).Info("small-model budget checkpoint reviewed the subtask")
+
+	return smallmodel.CheckpointNote(percent, verdict, advice), true
 }
 
 // budgetSpentTools are withheld once a subtask's command budget is spent: each
