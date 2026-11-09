@@ -23,6 +23,9 @@ var (
 // strategy gate can find it without re-parsing free text.
 const CredentialFactPrefix = "credential seen: "
 
+// HostFactPrefix labels a fact that records an IPv4 address seen in tool output.
+const HostFactPrefix = "host seen: "
+
 // Facts extracts structured, high-value facts from free text (typically tool
 // output) using regexes only — no model call, no cost, no drift. The result is
 // a stable, de-duplicated, sorted list suitable for feeding Store.MergeFacts.
@@ -52,7 +55,7 @@ func Facts(text string) []string {
 	}
 
 	for _, ip := range reIPv4.FindAllString(text, -1) {
-		set["host seen: "+ip] = struct{}{}
+		set[HostFactPrefix+ip] = struct{}{}
 	}
 
 	for _, m := range reCredPair.FindAllStringSubmatch(text, -1) {

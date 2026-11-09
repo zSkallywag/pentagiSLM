@@ -3,6 +3,8 @@ package smallmodel
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestDetectStuck_FlagsRepeatedSimilarFailures(t *testing.T) {
@@ -90,6 +92,23 @@ func TestDetectStuckByRepetition_DoesNotFireOnVariedCommands(t *testing.T) {
 	if _, stuck := DetectStuckByRepetition(recent, 10, 8, 3, 6); stuck {
 		t.Fatal("genuinely different commands must not be flagged, even with no progress")
 	}
+}
+
+func TestSubtaskBudgetSpentMessage_NamesTheWayToFinish(t *testing.T) {
+	withBarrier := SubtaskBudgetSpentMessage(150, 150, []string{"done"})
+	assert.Contains(t, withBarrier, "150 terminal commands (limit 150)")
+	assert.Contains(t, withBarrier, "Stop now: call done with the concrete findings")
+
+	assert.Contains(t, SubtaskBudgetSpentMessage(150, 150, []string{"hack_result", "done"}), "call hack_result or done")
+	assert.Contains(t, SubtaskBudgetSpentMessage(150, 150, nil), "Stop now: complete the subtask with")
+}
+
+func TestRepeatedFailureMessage_QuotesTheAnswerUpToTheLimit(t *testing.T) {
+	msg := RepeatedFailureMessage(`{"code":400,"error":"invalid JSON body"}`, 11)
+
+	assert.Contains(t, msg, "NOT RUN")
+	assert.Contains(t, msg, "\n\n{\"code\":400\n\n")
+	assert.NotContains(t, msg, "invalid JSON body")
 }
 
 func TestRecoveryDirectives_NameTheGestureAndEscalate(t *testing.T) {

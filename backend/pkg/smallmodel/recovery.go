@@ -45,6 +45,35 @@ func SubtaskBudgetMessage(count, cap int) string {
 	)
 }
 
+// SubtaskBudgetSpentMessage answers a call of a tool withheld once the subtask's
+// command budget is spent. finish names the tools the agent can still end its
+// work with, so the way out is in the answer and not left for the model to find.
+func SubtaskBudgetSpentMessage(count, cap int, finish []string) string {
+	way := "complete the subtask"
+	if len(finish) > 0 {
+		way = "call " + strings.Join(finish, " or ")
+	}
+	return fmt.Sprintf(
+		"SUBTASK BUDGET EXHAUSTED: this subtask has run %d terminal commands (limit %d) without completing. "+
+			"Commands, and the agents that run them, are no longer available for it, and this call was not run. "+
+			"Stop now: %s with the concrete findings and the blocker you have — do not keep trying.",
+		count, cap, way,
+	)
+}
+
+// RepeatedFailureMessage answers a call that already failed twice in this subtask
+// with the very same result, instead of running it a third time. Repeating an
+// identical call cannot change a deterministic failure, and it spends budget the
+// subtask needs for something different.
+func RepeatedFailureMessage(answer string, limit int) string {
+	return fmt.Sprintf(
+		"NOT RUN: this exact call already failed twice in this subtask with the same result, and running it again "+
+			"will not change that. The result it got:\n\n%s\n\nChange the arguments, use a different approach, or report "+
+			"the blocker.",
+		answer[:min(len(answer), limit)],
+	)
+}
+
 // BlockedGestureMessage is the tool response returned when a disabled gesture is
 // attempted again, so the agent sees the rejection in place of the output.
 func BlockedGestureMessage(canonical string) string {

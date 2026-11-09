@@ -1,6 +1,7 @@
 package smallmodel
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -80,6 +81,109 @@ func TestStore_AddFacts_ResetsProgressOnlyForNewFacts(t *testing.T) {
 	assert.Equal(t, 0, again)
 	_, since = st.RepetitionState(k)
 	assert.Equal(t, 1, since, "a duplicate fact is not progress and does not reset")
+}
+
+func TestStore_AddFacts_DoesNotCountAnotherHostInAKnownNetAsProgress(t *testing.T) {
+	st := NewStore()
+	k := Key{FlowID: 1, TaskID: 1}
+	st.RecordCommand(k, "curl -v https://www.example.com/")
+
+	assert.Equal(t, 1, st.AddFacts(k, "host seen: 3.161.82.3"))
+	_, since := st.RepetitionState(k)
+	assert.Equal(t, 0, since, "the first host of a /24 is progress")
+
+	st.RecordCommand(k, "curl -v https://www.example.com/")
+	assert.Equal(t, 1, st.AddFacts(k, "host seen: 3.161.82.114"), "another host of the /24 is still recorded")
+	_, since = st.RepetitionState(k)
+	assert.Equal(t, 1, since, "another host of a known /24 is not progress")
+	assert.Contains(t, st.Block(k), "host seen: 3.161.82.114")
+
+	st.RecordCommand(k, "nmap -sn N.N.N.N/N")
+	st.AddFacts(k, "host seen: 10.0.0.5")
+	_, since = st.RepetitionState(k)
+	assert.Equal(t, 0, since, "a host in a new /24 is progress")
+
+	st.RecordCommand(k, "nmap -sV N.N.N.N")
+	st.AddFacts(k, "host seen: 10.0.0.9", "443/tcp open")
+	_, since = st.RepetitionState(k)
+	assert.Equal(t, 0, since, "a new fact of another kind is progress beside a host that is not")
+}
+
+func TestStore_RepeatedFailure_AnswersOnlyACallThatFailedTheSameWayTwice(t *testing.T) {
+	st := NewStore()
+	const call = "terminal\ninput: curl -X POST /api/v3/transform\n"
+
+	st.RecordCallResult(7, call, `{"code":400}`, true)
+	_, ok := st.RepeatedFailure(7, call)
+	assert.False(t, ok, "one failure is not a pattern")
+
+	st.RecordCallResult(7, call, `{"code":400}`, true)
+	answer, ok := st.RepeatedFailure(7, call)
+	assert.True(t, ok)
+	assert.Equal(t, `{"code":400}`, answer)
+	_, ok = st.RepeatedFailure(8, call)
+	assert.False(t, ok, "the record is per subtask")
+
+	st.RecordCallResult(7, call, `{"code":500}`, true)
+	_, ok = st.RepeatedFailure(7, call)
+	assert.False(t, ok, "a different failure starts a new run")
+
+	st.RecordCallResult(7, call, `{"code":500}`, true)
+	answer, ok = st.RepeatedFailure(7, call)
+	assert.True(t, ok)
+	assert.Equal(t, `{"code":500}`, answer)
+
+	st.RecordCallResult(7, call, `{"listingCards":[]}`, false)
+	_, ok = st.RepeatedFailure(7, call)
+	assert.False(t, ok, "a success clears the record")
+
+	st.RecordCallResult(7, call, `{"listingCards":[]}`, false)
+	_, ok = st.RepeatedFailure(7, call)
+	assert.False(t, ok, "a call that keeps succeeding is never answered from the record")
+}
+
+func TestStore_RecordCallResult_StopsTakingNewCallsAtTheCap(t *testing.T) {
+	st := NewStore()
+	for i := 0; i < 256; i++ {
+		st.RecordCallResult(7, fmt.Sprintf("call %d", i), "denied", true)
+	}
+
+	st.RecordCallResult(7, "one call too many", "denied", true)
+	st.RecordCallResult(7, "one call too many", "denied", true)
+	_, ok := st.RepeatedFailure(7, "one call too many")
+	assert.False(t, ok, "a call past the cap runs as if unrecorded")
+
+	st.RecordCallResult(7, "call 0", "denied", true)
+	_, ok = st.RepeatedFailure(7, "call 0")
+	assert.True(t, ok, "a call already recorded keeps its run")
+}
+
+func TestStore_TakeSnapshot_ReportsEachNewFactOnce(t *testing.T) {
+	st := NewStore()
+	k := Key{FlowID: 1, TaskID: 1}
+	assert.Equal(t, Snapshot{}, st.TakeSnapshot(k), "an unknown task has nothing to report")
+
+	st.AddFacts(k, "22/tcp open: ssh", "host seen: 10.0.0.5")
+	st.RecordCommand(k, "ssh N.N.N.N")
+	st.AddFailedTry(k, "ssh failed: Permission denied")
+	st.BlockGesture(k, "hydra -l <str> N.N.N.N")
+
+	first := st.TakeSnapshot(k)
+	assert.Equal(t, Snapshot{
+		Facts:             2,
+		NewFacts:          []string{"22/tcp open: ssh", "host seen: 10.0.0.5"},
+		FailedTries:       []string{"ssh failed: Permission denied"},
+		RecentCommands:    []string{"ssh N.N.N.N"},
+		CmdsSinceProgress: 1,
+		BlockedGestures:   []string{"hydra -l <str> N.N.N.N"},
+	}, first)
+
+	st.AddFacts(k, "80/tcp open: http")
+	second := st.TakeSnapshot(k)
+	assert.Equal(t, 3, second.Facts)
+	assert.Equal(t, []string{"80/tcp open: http"}, second.NewFacts, "only the facts since the last snapshot")
+
+	assert.Empty(t, st.TakeSnapshot(k).NewFacts)
 }
 
 func TestStore_NoteRecoveryArmed_CountsConsecutiveSameGesture(t *testing.T) {

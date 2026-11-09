@@ -30,10 +30,31 @@ type State struct {
 	armedGesture    string
 	armedCount      int
 	blockedGestures map[string]struct{}
+
+	// seenNets holds the /24 of every host fact recorded, so a further address in
+	// a known /24 is recorded without counting as progress.
+	seenNets map[string]struct{}
+	// factsSnapshotted is how many Facts the last Snapshot already reported.
+	factsSnapshotted int
 }
 
 // recentCanonCap bounds the ring of canonical commands kept for loop detection.
 const recentCanonCap = 16
+
+// callRecordCap bounds the failed calls remembered per subtask; calls beyond it
+// simply run, as they would without the record.
+const callRecordCap = 256
+
+// repeatedFailureThreshold is how many identical failures a call may get before
+// it is answered from the record instead of being run again.
+const repeatedFailureThreshold = 2
+
+// callRecord is the last failed answer a call got in a subtask and how many
+// times in a row it got exactly that answer.
+type callRecord struct {
+	answer string
+	count  int
+}
 
 // ToBlock serializes the state into the fixed block that heads the prompt. The
 // labels are stable so a small model learns the shape; an empty state yields an
@@ -76,6 +97,9 @@ type Store struct {
 	gateFired map[Key]struct{}
 	// subtaskCmds counts terminal commands per subtask id, for the budget cap.
 	subtaskCmds map[int64]int
+	// failedCalls holds, per subtask id, the failed answers of calls keyed by the
+	// caller's canonical form of the call.
+	failedCalls map[int64]map[string]*callRecord
 }
 
 // NewStore returns an empty Store.
@@ -84,6 +108,7 @@ func NewStore() *Store {
 		states:      make(map[Key]*State),
 		gateFired:   make(map[Key]struct{}),
 		subtaskCmds: make(map[int64]int),
+		failedCalls: make(map[int64]map[string]*callRecord),
 	}
 }
 
@@ -122,23 +147,48 @@ func (st *Store) SetNextStep(k Key, next string) {
 
 // AddFacts appends facts, de-duplicating against what is already recorded, and
 // returns how many were genuinely new. A new fact is progress, so it resets the
-// no-progress counter the loop detector reads.
+// no-progress counter the loop detector reads — except a host in a /24 already
+// seen: every verbose HTTP client prints the address it connected to, and a CDN
+// rotates that address on each request, so counting each one would reset the
+// counter on every repeat of the same request.
 func (st *Store) AddFacts(k Key, facts ...string) int {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	s := st.stateLocked(k)
 	before := len(s.Facts)
 	s.Facts = appendUnique(s.Facts, facts)
-	added := len(s.Facts) - before
-	if added > 0 {
-		s.cmdsSinceProgress = 0
+	for _, fact := range s.Facts[before:] {
+		if s.isProgressLocked(fact) {
+			s.cmdsSinceProgress = 0
+		}
 	}
-	return added
+	return len(s.Facts) - before
+}
+
+// isProgressLocked reports whether a newly recorded fact is progress, recording
+// the /24 of a host fact so the next address in it is not.
+func (s *State) isProgressLocked(fact string) bool {
+	addr, ok := strings.CutPrefix(fact, HostFactPrefix)
+	if !ok {
+		return true
+	}
+	network := addr
+	if i := strings.LastIndexByte(addr, '.'); i >= 0 {
+		network = addr[:i]
+	}
+	if _, seen := s.seenNets[network]; seen {
+		return false
+	}
+	if s.seenNets == nil {
+		s.seenNets = make(map[string]struct{})
+	}
+	s.seenNets[network] = struct{}{}
+	return true
 }
 
 // RecordCommand appends a canonical command to the per-task ring and counts it as
 // one more command since the last progress. Called before each terminal command
-// that passed the pre-execution guards.
+// or file call that passed the pre-execution guards.
 func (st *Store) RecordCommand(k Key, canonical string) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -205,6 +255,86 @@ func (st *Store) SubtaskCommands(subtaskID int64) int {
 	st.mu.RLock()
 	defer st.mu.RUnlock()
 	return st.subtaskCmds[subtaskID]
+}
+
+// RecordCallResult files the answer a call got in a subtask. call is the caller's
+// canonical form of the call. A failed answer identical to the last one recorded
+// for the call extends its run; any other failed answer starts a new run, and a
+// successful answer clears the record, since the call no longer fails the same way.
+func (st *Store) RecordCallResult(subtaskID int64, call, answer string, failed bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	calls := st.failedCalls[subtaskID]
+	if !failed {
+		delete(calls, call)
+		return
+	}
+	if calls == nil {
+		calls = make(map[string]*callRecord)
+		st.failedCalls[subtaskID] = calls
+	}
+	rec, ok := calls[call]
+	if !ok {
+		if len(calls) >= callRecordCap {
+			return
+		}
+		calls[call] = &callRecord{answer: answer, count: 1}
+		return
+	}
+	if rec.answer == answer {
+		rec.count++
+		return
+	}
+	rec.answer, rec.count = answer, 1
+}
+
+// RepeatedFailure returns the answer a call keeps failing with when it has failed
+// with that same answer at least twice in the subtask, so the caller can answer
+// from the record instead of running the call a third time.
+func (st *Store) RepeatedFailure(subtaskID int64, call string) (string, bool) {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	rec, ok := st.failedCalls[subtaskID][call]
+	if !ok || rec.count < repeatedFailureThreshold {
+		return "", false
+	}
+	return rec.answer, true
+}
+
+// Snapshot is the loop-detection view of a task's state, for logging: the
+// counts and lists that decide whether a recovery directive fires.
+type Snapshot struct {
+	Facts             int
+	NewFacts          []string
+	FailedTries       []string
+	RecentCommands    []string
+	CmdsSinceProgress int
+	BlockedGestures   []string
+}
+
+// TakeSnapshot returns the state of a task for logging. NewFacts holds only the
+// facts recorded since the previous snapshot of the task, so a log written on
+// every turn shows each fact once, at the turn it appeared.
+func (st *Store) TakeSnapshot(k Key) Snapshot {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	s, ok := st.states[k]
+	if !ok {
+		return Snapshot{}
+	}
+	snap := Snapshot{
+		Facts:             len(s.Facts),
+		NewFacts:          append([]string(nil), s.Facts[min(s.factsSnapshotted, len(s.Facts)):]...),
+		FailedTries:       append([]string(nil), s.FailedTries...),
+		RecentCommands:    append([]string(nil), s.recentCanon...),
+		CmdsSinceProgress: s.cmdsSinceProgress,
+	}
+	for gesture := range s.blockedGestures {
+		snap.BlockedGestures = append(snap.BlockedGestures, gesture)
+	}
+	sort.Strings(snap.BlockedGestures)
+	s.factsSnapshotted = len(s.Facts)
+	return snap
 }
 
 // RepetitionState returns a copy of the recent canonical commands and the number
