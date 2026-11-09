@@ -97,7 +97,7 @@ func (rd *repeatingDetector) detect(toolCall llms.ToolCall) bool {
 		return false
 	}
 
-	funcCall := rd.clearCallArguments(toolCall.FunctionCall)
+	funcCall := clearCallArguments(toolCall.FunctionCall)
 
 	if len(rd.funcCalls) == 0 {
 		rd.funcCalls = append(rd.funcCalls, funcCall)
@@ -135,7 +135,36 @@ func repeatingToolResponse(funcName string, repeats int, previous string) string
 		funcName, repeats, previous[:min(len(previous), repeatEchoLimit)])
 }
 
-func (rd *repeatingDetector) clearCallArguments(toolCall *llms.FunctionCall) llms.FunctionCall {
+// RepeatingToolCallError ends an agent chain whose model kept making one
+// identical tool call. Arguments is the call as the detector compared it, without
+// its free-text message. An agent that delegated to the looping one receives it
+// as the reason the delegation produced no result.
+type RepeatingToolCallError struct {
+	Name      string
+	Arguments string
+	Count     int
+}
+
+func (e *RepeatingToolCallError) Error() string {
+	return fmt.Sprintf("tool '%s' repeated %d times consecutively, aborting chain", e.Name, e.Count)
+}
+
+// delegatedRepeatResponse answers the delegating agent when the agent it called
+// aborted on a repeating tool call. Delegating the same work again starts a fresh
+// chain of the same model on the same problem, so the answer says that instead of
+// letting the delegation be retried.
+func delegatedRepeatResponse(agent string, e *RepeatingToolCallError) string {
+	return fmt.Sprintf(
+		"The '%s' agent stopped without a result: it called '%s' with identical arguments %d times in a row "+
+			"and was aborted. The call it repeated:\n\n%s\n\nDelegating the same work again unchanged will end "+
+			"the same way. Finish with what you already have, or delegate a genuinely different approach.",
+		agent, e.Name, e.Count, e.Arguments[:min(len(e.Arguments), repeatEchoLimit)])
+}
+
+// clearCallArguments is the form in which two calls count as identical: the
+// arguments with keys sorted and the free-text message dropped, because a model
+// rewords its running commentary while repeating the same action.
+func clearCallArguments(toolCall *llms.FunctionCall) llms.FunctionCall {
 	var v map[string]any
 	if err := json.Unmarshal([]byte(toolCall.Arguments), &v); err != nil {
 		return *toolCall

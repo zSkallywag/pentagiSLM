@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -11,7 +12,11 @@ import (
 	"pentagi/pkg/providers/pconfig"
 	"pentagi/pkg/providers/provider"
 	"pentagi/pkg/providers/tester/mock"
+	"pentagi/pkg/smallmodel"
+	"pentagi/pkg/tools"
 
+	"github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vxcontrol/langchaingo/llms"
@@ -173,4 +178,113 @@ func TestSmallModel_SmallModelCompactIfOverBudget_MeasuresTheChainAgainstItsRole
 			assert.Equal(t, tt.wantDropped, smallModelChainMentions(compacted, "summarizer was unavailable"))
 		})
 	}
+}
+
+// smallModelCountingExecutor exists for every name and counts the calls that reach it.
+type smallModelCountingExecutor struct {
+	tools.ContextToolsExecutor
+
+	executed []string
+}
+
+func (e *smallModelCountingExecutor) Execute(
+	_ context.Context, _ int64, _, name, _, _ string, _ json.RawMessage,
+) (string, error) {
+	e.executed = append(e.executed, name)
+	return "ran " + name, nil
+}
+
+func (*smallModelCountingExecutor) IsFunctionExists(string) bool { return true }
+
+func (*smallModelCountingExecutor) GetBarrierToolNames() []string {
+	return []string{tools.FinalyToolName}
+}
+
+func TestSmallModel_SmallModelExecutorFor_WithholdsTheCommandToolsOnceTheBudgetIsSpent(t *testing.T) {
+	fp := newFlowProvider()
+	fp.cfg.SmallModelMode = true
+	fp.cfg.SmallModelVerifierEnabled = true
+	fp.cfg.SmallModelSubtaskMaxCommands = 2
+	subtaskID := int64(152)
+	inner := &smallModelCountingExecutor{}
+
+	fp.smallModelState().IncrSubtaskCommands(subtaskID)
+	assert.Same(t, inner, fp.smallModelExecutorFor(inner, &subtaskID), "within the budget the agent keeps its executor")
+	assert.Same(t, inner, fp.smallModelExecutorFor(inner, nil), "an agent outside a subtask has no budget")
+
+	fp.smallModelState().IncrSubtaskCommands(subtaskID)
+	spent := fp.smallModelExecutorFor(inner, &subtaskID)
+
+	for _, name := range []string{tools.TerminalToolName, tools.PentesterToolName, tools.CoderToolName, tools.MaintenanceToolName} {
+		assert.False(t, spent.IsFunctionExists(name), "%s must be withheld", name)
+		answer, err := spent.Execute(context.Background(), 0, "call_1", name, name, "", json.RawMessage(`{}`))
+		require.NoError(t, err)
+		assert.Contains(t, answer, "SUBTASK BUDGET EXHAUSTED: this subtask has run 2 terminal commands (limit 2)")
+		assert.Contains(t, answer, "call done", "the answer must name the way to finish")
+	}
+	assert.Empty(t, inner.executed, "a withheld tool must not run")
+
+	assert.True(t, spent.IsFunctionExists(tools.FileToolName))
+	answer, err := spent.Execute(context.Background(), 0, "call_2", tools.FileToolName, tools.FileToolName, "", json.RawMessage(`{}`))
+	require.NoError(t, err)
+	assert.Equal(t, "ran file", answer)
+	assert.Equal(t, []string{tools.FileToolName}, inner.executed)
+}
+
+func TestSmallModel_RecordLoopCommand_RingsFileCallsWithoutChargingTheBudget(t *testing.T) {
+	fp := newFlowProvider()
+	fp.cfg.SmallModelMode = true
+	taskID, subtaskID := int64(9), int64(152)
+
+	fp.recordLoopCommand(tools.TerminalToolName, json.RawMessage(`{"input":"id","message":"who am I"}`), &taskID, &subtaskID)
+	fp.recordLoopCommand(tools.FileToolName,
+		json.RawMessage(`{"action":"read_file","path":"/work/transform_resp_6761229_v3.json","message":"reading the saved response"}`),
+		&taskID, &subtaskID)
+	fp.recordLoopCommand(tools.FileToolName, json.RawMessage(`{"action":"read_file","message":"no path"}`), &taskID, &subtaskID)
+
+	recent, since := fp.smallModelState().RepetitionState(smallmodel.Key{TaskID: taskID})
+	assert.Equal(t, []string{"id", "file read_file /work/*.json"}, recent)
+	assert.Equal(t, 2, since, "a file call counts as a command since the last progress")
+	assert.Equal(t, 1, fp.smallModelState().SubtaskCommands(subtaskID), "only the terminal command is charged to the budget")
+}
+
+func TestSmallModel_LogSmallModelState_WritesTheLoopStateOfEachTurn(t *testing.T) {
+	hook := logtest.NewGlobal()
+	taskID, subtaskID := int64(9), int64(152)
+
+	fp := newFlowProvider()
+	fp.cfg.SmallModelMode = true
+	fp.cfg.SmallModelSubtaskMaxCommands = 150
+	key := smallmodel.Key{TaskID: taskID}
+	fp.smallModelState().AddFacts(key, "host seen: 3.161.82.3")
+	fp.recordLoopCommand(tools.TerminalToolName, json.RawMessage(`{"input":"id"}`), &taskID, &subtaskID)
+
+	stateEntries := func() []*logrus.Entry {
+		var found []*logrus.Entry
+		for _, entry := range hook.AllEntries() {
+			if entry.Message == "small-model state" {
+				found = append(found, entry)
+			}
+		}
+		return found
+	}
+
+	fp.logSmallModelState(logrus.NewEntry(logrus.StandardLogger()), &taskID, &subtaskID)
+	fp.logSmallModelState(logrus.NewEntry(logrus.StandardLogger()), &taskID, &subtaskID)
+
+	entries := stateEntries()
+	require.Len(t, entries, 2)
+	assert.Equal(t, logrus.InfoLevel, entries[0].Level)
+	assert.Equal(t, 1, entries[0].Data["facts"])
+	assert.Equal(t, []string{"host seen: 3.161.82.3"}, entries[0].Data["new_facts"])
+	assert.Equal(t, []string{"id"}, entries[0].Data["recent_commands"])
+	assert.Equal(t, 1, entries[0].Data["cmds_since_progress"])
+	assert.Equal(t, 1, entries[0].Data["subtask_commands"])
+	assert.Equal(t, 150, entries[0].Data["subtask_command_budget"])
+	assert.Empty(t, entries[1].Data["new_facts"], "a fact is reported once, on the turn it appeared")
+
+	hook.Reset()
+	fp.cfg.SmallModelMode = false
+	fp.logSmallModelState(logrus.NewEntry(logrus.StandardLogger()), &taskID, &subtaskID)
+	assert.Empty(t, stateEntries(), "without the small-model profile there is no state to log")
 }

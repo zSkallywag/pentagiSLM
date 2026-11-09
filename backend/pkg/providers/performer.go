@@ -65,7 +65,7 @@ func (fp *flowProvider) performAgentChain(
 	chainID int64,
 	taskID, subtaskID *int64,
 	chain []llms.MessageContent,
-	executor tools.ContextToolsExecutor,
+	chainExecutor tools.ContextToolsExecutor,
 	summarizer csum.Summarizer,
 ) error {
 	ctx, span := obs.Observer.NewSpan(ctx, obs.SpanKindInternal, "providers.flowProvider.performAgentChain")
@@ -118,6 +118,10 @@ func (fp *flowProvider) performAgentChain(
 	}
 
 	for iteration := 0; ; iteration++ {
+		// Taken again on every turn: a subtask can spend its command budget in the
+		// middle of a chain, and from then on the agent is offered fewer tools.
+		executor := fp.smallModelExecutorFor(chainExecutor, subtaskID)
+
 		if iteration >= maxCallsLimit {
 			msg := fmt.Sprintf("agent chain exceeded maximum iterations (%d)", maxCallsLimit)
 			logger.WithField("iteration", iteration).Error(msg)
@@ -162,6 +166,7 @@ func (fp *flowProvider) performAgentChain(
 			}
 
 			callContext := executionContext
+			fp.logSmallModelState(logger, taskID, subtaskID)
 			if block := fp.smallModelStateBlock(taskID); block != "" {
 				callContext = "CURRENT STATE (authoritative; built from tool output, survives summarization):\n" +
 					block + "\n\n" + callContext
@@ -345,9 +350,13 @@ func (fp *flowProvider) execToolCall(
 
 	if detector.detect(toolCall) {
 		if len(detector.funcCalls) >= RepeatingToolCallThreshold+maxSoftDetectionsBeforeAbort {
-			errMsg := fmt.Sprintf("tool '%s' repeated %d times consecutively, aborting chain", funcName, len(detector.funcCalls))
-			logger.WithField("repeat_count", len(detector.funcCalls)).Error(errMsg)
-			return "", errors.New(errMsg)
+			abort := &RepeatingToolCallError{
+				Name:      funcName,
+				Arguments: detector.funcCalls[len(detector.funcCalls)-1].Arguments,
+				Count:     len(detector.funcCalls),
+			}
+			logger.WithField("repeat_count", abort.Count).Error(abort.Error())
+			return "", abort
 		}
 
 		response := repeatingToolResponse(funcName, len(detector.funcCalls), detector.lastResponse)
@@ -372,10 +381,21 @@ func (fp *flowProvider) execToolCall(
 
 	if blockedResponse, blocked := fp.verifyToolCall(funcName, funcArgs, taskID, subtaskID); blocked {
 		logger.WithField("verifier", "blocked").Warn("pre-execution verifier blocked tool call")
+		// The refusal is what the tool answered, so a repeat of the refused call
+		// quotes it back instead of a bare "try another tool" that drops the reason.
+		detector.lastResponse = blockedResponse
 		return blockedResponse, nil
 	}
 
-	fp.recordTerminalCommand(funcName, funcArgs, taskID, subtaskID)
+	// The call as the model made it keys the failure record, both for the lookup
+	// and for filing the answer: argument correction below may rewrite funcArgs.
+	madeCall := &llms.FunctionCall{Name: funcName, Arguments: string(funcArgs)}
+	if recorded, repeated := fp.smallModelRepeatedFailure(madeCall, subtaskID); repeated {
+		detector.lastResponse = recorded
+		return recorded, nil
+	}
+
+	fp.recordLoopCommand(funcName, funcArgs, taskID, subtaskID)
 
 	var (
 		err      error
@@ -404,6 +424,17 @@ func (fp *flowProvider) execToolCall(
 				return "", err
 			}
 
+			// A delegated agent that aborted on a repeating call has already spent
+			// its chain; running it again with "corrected" arguments starts the same
+			// loop in a fresh chain. Why it stopped is the delegation's answer.
+			var repeating *RepeatingToolCallError
+			if errors.As(err, &repeating) {
+				logger.WithError(err).Warn("delegated agent aborted on a repeating tool call")
+				response = delegatedRepeatResponse(funcName, repeating)
+				detector.lastResponse = response
+				break
+			}
+
 			logger.WithError(err).Warn("failed to exec function")
 
 			funcExecErr := err
@@ -420,6 +451,7 @@ func (fp *flowProvider) execToolCall(
 			}
 		} else {
 			detector.lastResponse = response
+			fp.smallModelRecordCallResult(madeCall, response, subtaskID)
 			break
 		}
 	}

@@ -167,13 +167,11 @@ func (fp *flowProvider) verifyToolCall(funcName string, funcArgs json.RawMessage
 
 	// Per-subtask command budget: the hardest cap, checked before anything else
 	// so a runaway "do not stop" subtask is forced to conclude.
-	if subtaskID != nil && fp.cfg.SmallModelSubtaskMaxCommands > 0 {
-		if n := fp.smallModelState().SubtaskCommands(*subtaskID); n >= fp.cfg.SmallModelSubtaskMaxCommands {
-			logrus.WithFields(logrus.Fields{
-				"flow": fp.flowID, "subtask": *subtaskID, "guard": "subtask_budget", "count": n,
-			}).Warn("small-model guard exhausted the subtask command budget")
-			return smallmodel.SubtaskBudgetMessage(n, fp.cfg.SmallModelSubtaskMaxCommands), true
-		}
+	if n, spent := fp.smallModelSubtaskBudgetSpent(subtaskID); spent {
+		logrus.WithFields(logrus.Fields{
+			"flow": fp.flowID, "subtask": *subtaskID, "guard": "subtask_budget", "count": n,
+		}).Warn("small-model guard exhausted the subtask command budget")
+		return smallmodel.SubtaskBudgetMessage(n, fp.cfg.SmallModelSubtaskMaxCommands), true
 	}
 
 	var action struct {
@@ -217,6 +215,137 @@ func (fp *flowProvider) verifyToolCall(funcName string, funcArgs json.RawMessage
 	}
 
 	return "", false
+}
+
+// smallModelSubtaskBudgetSpent reports the terminal commands a subtask has run and
+// whether that has reached its budget, the point from which commands are refused
+// and the agent is left only the tools to finish with.
+func (fp *flowProvider) smallModelSubtaskBudgetSpent(subtaskID *int64) (int, bool) {
+	if !fp.smallModelEnabled() || !fp.cfg.SmallModelVerifierEnabled ||
+		subtaskID == nil || fp.cfg.SmallModelSubtaskMaxCommands <= 0 {
+		return 0, false
+	}
+	n := fp.smallModelState().SubtaskCommands(*subtaskID)
+	return n, n >= fp.cfg.SmallModelSubtaskMaxCommands
+}
+
+// budgetSpentTools are withheld once a subtask's command budget is spent: each
+// runs commands, directly or through the agent it delegates to.
+var budgetSpentTools = map[string]struct{}{
+	tools.TerminalToolName:    {},
+	tools.PentesterToolName:   {},
+	tools.CoderToolName:       {},
+	tools.MaintenanceToolName: {},
+}
+
+// budgetSpentExecutor is the executor an agent works with once its subtask's
+// command budget is spent. A small model ignores "stop" written in a tool answer
+// but cannot call a tool it is not offered, so the tools that run commands are
+// left out of the schemas it is sent. A call that still names one, copied from
+// earlier in the chain, is answered with the budget message instead of running.
+type budgetSpentExecutor struct {
+	tools.ContextToolsExecutor
+
+	message string
+}
+
+func (e budgetSpentExecutor) Tools() []llms.Tool {
+	all := e.ContextToolsExecutor.Tools()
+	kept := make([]llms.Tool, 0, len(all))
+	for _, tool := range all {
+		if tool.Function != nil {
+			if _, withheld := budgetSpentTools[tool.Function.Name]; withheld {
+				continue
+			}
+		}
+		kept = append(kept, tool)
+	}
+	return kept
+}
+
+func (e budgetSpentExecutor) IsFunctionExists(name string) bool {
+	if _, withheld := budgetSpentTools[name]; withheld {
+		return false
+	}
+	return e.ContextToolsExecutor.IsFunctionExists(name)
+}
+
+func (e budgetSpentExecutor) Execute(
+	ctx context.Context, streamID int64, id, name, obsName, thinking string, args json.RawMessage,
+) (string, error) {
+	if _, withheld := budgetSpentTools[name]; withheld {
+		logrus.WithContext(ctx).WithField("func_name", name).Warn("small-model guard refused a tool withheld by the spent subtask budget")
+		return e.message, nil
+	}
+	return e.ContextToolsExecutor.Execute(ctx, streamID, id, name, obsName, thinking, args)
+}
+
+// smallModelExecutorFor returns the executor an agent of the subtask works with
+// on its next turn: the one it was given, or, once the subtask's command budget is
+// spent, a view of it that withholds the tools that run commands.
+func (fp *flowProvider) smallModelExecutorFor(
+	executor tools.ContextToolsExecutor, subtaskID *int64,
+) tools.ContextToolsExecutor {
+	n, spent := fp.smallModelSubtaskBudgetSpent(subtaskID)
+	if !spent {
+		return executor
+	}
+	return budgetSpentExecutor{
+		ContextToolsExecutor: executor,
+		message: smallmodel.SubtaskBudgetSpentMessage(
+			n, fp.cfg.SmallModelSubtaskMaxCommands, executor.GetBarrierToolNames(),
+		),
+	}
+}
+
+// failureRecordedTools are the tools whose identical calls are answered from the
+// failure record: their answer is a function of the call and of the sandbox or
+// page it reads, not of time, as a web search's is.
+var failureRecordedTools = map[string]struct{}{
+	tools.TerminalToolName: {},
+	tools.FileToolName:     {},
+	tools.BrowserToolName:  {},
+}
+
+// smallModelCallKey is the form in which two calls of a subtask count as the
+// same call for the failure record, or false for a call the record ignores.
+func (fp *flowProvider) smallModelCallKey(call *llms.FunctionCall, subtaskID *int64) (string, bool) {
+	if !fp.smallModelEnabled() || subtaskID == nil || call == nil {
+		return "", false
+	}
+	if _, ok := failureRecordedTools[call.Name]; !ok {
+		return "", false
+	}
+	cleared := clearCallArguments(call)
+	return cleared.Name + "\n" + cleared.Arguments, true
+}
+
+// smallModelRepeatedFailure returns the answer for a call that already failed
+// twice in the subtask with the same result, so it is not run a third time.
+func (fp *flowProvider) smallModelRepeatedFailure(call *llms.FunctionCall, subtaskID *int64) (string, bool) {
+	key, ok := fp.smallModelCallKey(call, subtaskID)
+	if !ok {
+		return "", false
+	}
+	answer, repeated := fp.smallModelState().RepeatedFailure(*subtaskID, key)
+	if !repeated {
+		return "", false
+	}
+	logrus.WithFields(logrus.Fields{
+		"flow": fp.flowID, "subtask": *subtaskID, "guard": "repeated_failure", "func_name": call.Name,
+	}).Warn("small-model guard answered a repeatedly failing call from the record")
+	return smallmodel.RepeatedFailureMessage(answer, repeatEchoLimit), true
+}
+
+// smallModelRecordCallResult files the raw answer a call got, for the failure
+// record. It runs on the answer before compaction, which can cut the marker that
+// shows the failure.
+func (fp *flowProvider) smallModelRecordCallResult(call *llms.FunctionCall, response string, subtaskID *int64) {
+	key, ok := fp.smallModelCallKey(call, subtaskID)
+	if !ok {
+		return
+	}
+	fp.smallModelState().RecordCallResult(*subtaskID, key, response, smallmodel.LooksFailed(response))
 }
 
 // compactToolResponse pre-processes a raw tool response for a small model: it
@@ -338,24 +467,63 @@ func (fp *flowProvider) smallModelStateBlock(taskID *int64) string {
 	return block
 }
 
-// recordTerminalCommand files a terminal command's canonical form into the
-// per-task loop-detection ring before it executes, so DetectStuckByRepetition
-// can see a repeated gesture on the next turn.
-func (fp *flowProvider) recordTerminalCommand(funcName string, funcArgs json.RawMessage, taskID, subtaskID *int64) {
-	if !fp.smallModelEnabled() || taskID == nil || funcName != tools.TerminalToolName {
-		return
-	}
-	var action struct {
-		Input string `json:"input"`
-	}
-	if err := json.Unmarshal(funcArgs, &action); err != nil || action.Input == "" {
+// recordLoopCommand files the canonical form of a terminal command or a file call
+// into the per-task loop-detection ring before it executes, so
+// DetectStuckByRepetition can see a repeated gesture on the next turn. Only a
+// terminal command is charged to the subtask's command budget: re-reading the
+// same saved output is a loop worth seeing, but it runs nothing.
+func (fp *flowProvider) recordLoopCommand(funcName string, funcArgs json.RawMessage, taskID, subtaskID *int64) {
+	if !fp.smallModelEnabled() || taskID == nil {
 		return
 	}
 	key := smallmodel.Key{FlowID: fp.flowID, TaskID: *taskID}
-	fp.smallModelState().RecordCommand(key, smallmodel.CanonicalizeCommand(action.Input))
-	if subtaskID != nil {
-		fp.smallModelState().IncrSubtaskCommands(*subtaskID)
+
+	switch funcName {
+	case tools.TerminalToolName:
+		var action struct {
+			Input string `json:"input"`
+		}
+		if err := json.Unmarshal(funcArgs, &action); err != nil || action.Input == "" {
+			return
+		}
+		fp.smallModelState().RecordCommand(key, smallmodel.CanonicalizeCommand(action.Input))
+		if subtaskID != nil {
+			fp.smallModelState().IncrSubtaskCommands(*subtaskID)
+		}
+	case tools.FileToolName:
+		var action struct {
+			Action string `json:"action"`
+			Path   string `json:"path"`
+		}
+		if err := json.Unmarshal(funcArgs, &action); err != nil || action.Path == "" {
+			return
+		}
+		fp.smallModelState().RecordCommand(key, "file "+action.Action+" "+smallmodel.CanonicalizeCommand(action.Path))
 	}
+}
+
+// logSmallModelState writes the loop-detection state of the task the agent is
+// working on, once per turn. The state lives only in memory and is not part of
+// the stored chain, so this line is the only record of why a recovery directive
+// did or did not fire.
+func (fp *flowProvider) logSmallModelState(logger *logrus.Entry, taskID, subtaskID *int64) {
+	if !fp.smallModelEnabled() || taskID == nil {
+		return
+	}
+	snap := fp.smallModelState().TakeSnapshot(smallmodel.Key{FlowID: fp.flowID, TaskID: *taskID})
+	fields := logrus.Fields{
+		"facts":               snap.Facts,
+		"new_facts":           snap.NewFacts,
+		"failed_tries":        snap.FailedTries,
+		"recent_commands":     snap.RecentCommands,
+		"cmds_since_progress": snap.CmdsSinceProgress,
+		"blocked_gestures":    snap.BlockedGestures,
+	}
+	if subtaskID != nil {
+		fields["subtask_commands"] = fp.smallModelState().SubtaskCommands(*subtaskID)
+		fields["subtask_command_budget"] = fp.cfg.SmallModelSubtaskMaxCommands
+	}
+	logger.WithFields(fields).Info("small-model state")
 }
 
 // smallModelExamples lazily loads the few-shot example set from the configured

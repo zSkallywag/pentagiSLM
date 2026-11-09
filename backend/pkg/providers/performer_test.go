@@ -24,6 +24,7 @@ import (
 	"pentagi/pkg/providers/provider"
 	"pentagi/pkg/providers/tester/mock"
 	"pentagi/pkg/schema"
+	"pentagi/pkg/smallmodel"
 	"pentagi/pkg/templates"
 	"pentagi/pkg/tools"
 
@@ -700,6 +701,149 @@ func TestPerformer_ExecToolCall_AnswersARepeatWithWhatTheToolSaidUntilItAborts(t
 	_, err := call()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "repeated 7 times consecutively, aborting chain")
+
+	var repeating *RepeatingToolCallError
+	require.ErrorAs(t, err, &repeating, "a delegating agent must be able to tell the abort apart")
+	assert.Equal(t, RepeatingToolCallError{
+		Name:      "execute_task_and_return_summary",
+		Arguments: "question: scan\n",
+		Count:     7,
+	}, *repeating)
+}
+
+func performerTerminalCall(input string) *callResult {
+	args, _ := json.Marshal(map[string]string{"input": input, "message": "checking"})
+	return &callResult{funcCalls: []llms.ToolCall{{
+		ID:           "call_1",
+		Type:         "function",
+		FunctionCall: &llms.FunctionCall{Name: tools.TerminalToolName, Arguments: string(args)},
+	}}}
+}
+
+func TestPerformer_ExecToolCall_QuotesTheVerifierRefusalOnARepeat(t *testing.T) {
+	fp := newFlowProvider()
+	fp.Provider = mock.NewProvider(provider.ProviderOpenAI, "openai", "gpt-5.6-sol")
+	fp.cfg.SmallModelMode = true
+	fp.cfg.SmallModelVerifierEnabled = true
+	fp.cfg.SmallModelSubtaskMaxCommands = 1
+	subtaskID := int64(152)
+	fp.smallModelState().IncrSubtaskCommands(subtaskID)
+
+	executor := &performerExecutor{}
+	detector := &repeatingDetector{}
+	result := performerTerminalCall("ls -la /work/")
+
+	var answers []string
+	for range 3 {
+		answer, err := fp.execToolCall(
+			context.Background(), pconfig.OptionsTypePentester, 1, 0, result,
+			&executionMonitor{}, detector, executor, nil, &subtaskID, nil,
+		)
+		require.NoError(t, err)
+		answers = append(answers, answer)
+	}
+
+	assert.Contains(t, answers[0], "SUBTASK BUDGET EXHAUSTED")
+	assert.Contains(t, answers[2], "identical arguments 3 times")
+	assert.Contains(t, answers[2], "SUBTASK BUDGET EXHAUSTED", "the repeat must keep the reason the call was refused")
+	assert.Zero(t, executor.calls, "a refused command never reaches the tool")
+}
+
+func TestPerformer_ExecToolCall_AnswersADelegationThatAbortedOnARepeat(t *testing.T) {
+	fp := newFlowProvider()
+	fp.Provider = mock.NewProvider(provider.ProviderOpenAI, "openai", "gpt-5.6-sol")
+
+	abort := &RepeatingToolCallError{Name: tools.TerminalToolName, Arguments: "input: ls -la /work/\n", Count: 7}
+	executor := &performerExecutor{err: fmt.Errorf("failed to execute handler: failed to get pentester result: %w", abort)}
+	result := &callResult{funcCalls: []llms.ToolCall{{
+		ID:           "call_1",
+		Type:         "function",
+		FunctionCall: &llms.FunctionCall{Name: tools.PentesterToolName, Arguments: `{"question":"probe the API"}`},
+	}}}
+
+	answer, err := fp.execToolCall(
+		context.Background(), pconfig.OptionsTypePrimaryAgent, 1, 0, result,
+		&executionMonitor{}, &repeatingDetector{}, executor, nil, nil, nil,
+	)
+
+	require.NoError(t, err, "one looping agent must not end the chain that delegated to it")
+	assert.Equal(t, 1, executor.calls, "the delegation must not be run again")
+	assert.Contains(t, answer, "The 'pentester' agent stopped without a result")
+	assert.Contains(t, answer, "'terminal' with identical arguments 7 times")
+	assert.Contains(t, answer, "input: ls -la /work/")
+}
+
+// performerScriptedExecutor answers each terminal command with its scripted output and counts the runs of each.
+type performerScriptedExecutor struct {
+	tools.ContextToolsExecutor
+
+	outputs map[string]string
+	runs    map[string]int
+}
+
+func (e *performerScriptedExecutor) Execute(
+	_ context.Context, _ int64, _, _, _, _ string, args json.RawMessage,
+) (string, error) {
+	var action struct {
+		Input string `json:"input"`
+	}
+	_ = json.Unmarshal(args, &action)
+	e.runs[action.Input]++
+
+	return e.outputs[action.Input], nil
+}
+
+func TestPerformer_ExecToolCall_AnswersARepeatedFailureFromTheRecord(t *testing.T) {
+	const (
+		post = `curl -s -X POST https://www.example.com/api/v3/listing_card/transform -d '{"listings":"x"}'`
+		list = "ls /work"
+	)
+
+	tests := []struct {
+		name       string
+		smallModel bool
+		wantPosts  int
+	}{
+		{name: "the third identical failure is answered from the record", smallModel: true, wantPosts: 2},
+		{name: "without the small-model profile every call runs", smallModel: false, wantPosts: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fp := newFlowProvider()
+			fp.Provider = mock.NewProvider(provider.ProviderOpenAI, "openai", "gpt-5.6-sol")
+			fp.cfg.SmallModelMode = tt.smallModel
+			subtaskID := int64(152)
+
+			executor := &performerScriptedExecutor{
+				outputs: map[string]string{
+					post: `{"code":400,"error":"invalid JSON body"}` + "\n[exit code: 0]",
+					list: "transform_resp_v3.json\n[exit code: 0]",
+				},
+				runs: map[string]int{},
+			}
+			detector := &repeatingDetector{}
+
+			var last string
+			for _, input := range []string{post, list, post, list, post, list} {
+				answer, err := fp.execToolCall(
+					context.Background(), pconfig.OptionsTypePentester, 1, 0, performerTerminalCall(input),
+					&executionMonitor{}, detector, executor, nil, &subtaskID, nil,
+				)
+				require.NoError(t, err)
+				if input == post {
+					last = answer
+				}
+			}
+
+			assert.Equal(t, tt.wantPosts, executor.runs[post])
+			assert.Equal(t, 3, executor.runs[list], "a call that succeeds always runs")
+			if tt.smallModel {
+				assert.Contains(t, last, "NOT RUN")
+				assert.Contains(t, last, `{"code":400,"error":"invalid JSON body"}`)
+			}
+		})
+	}
 }
 
 func TestPerformer_ExecToolCall_ReturnsAnErrorNoCorrectionCanFixAtOnce(t *testing.T) {
@@ -877,6 +1021,111 @@ func TestPerformer_PerformAgentChain_CompactsAChainItsToolSchemasPushOutOfTheWin
 			assert.Equal(t, 1, db.chainWrites, "the compacted chain replaces the stored one")
 		})
 	}
+}
+
+// performerOfferedProvider records the names of the tools the agent's call carried and refuses the call.
+type performerOfferedProvider struct {
+	*mock.Provider
+
+	offered []string
+}
+
+func (p *performerOfferedProvider) CallWithTools(
+	_ context.Context, _ pconfig.ProviderOptionsType, _ []llms.MessageContent, offered []llms.Tool, _ streaming.Callback,
+) (*llms.ContentResponse, error) {
+	for _, tool := range offered {
+		p.offered = append(p.offered, tool.Function.Name)
+	}
+
+	return nil, performerLocalRefusal
+}
+
+// performerToolSetExecutor offers one schema per name and finishes with done.
+type performerToolSetExecutor struct {
+	tools.ContextToolsExecutor
+
+	names []string
+}
+
+func (e performerToolSetExecutor) Tools() []llms.Tool {
+	offered := make([]llms.Tool, 0, len(e.names))
+	for _, name := range e.names {
+		offered = append(offered, llms.Tool{Type: "function", Function: &llms.FunctionDefinition{Name: name}})
+	}
+
+	return offered
+}
+
+func (performerToolSetExecutor) GetBarrierToolNames() []string { return []string{tools.FinalyToolName} }
+
+func TestPerformer_PerformAgentChain_OffersNoCommandToolsOnceTheSubtaskBudgetIsSpent(t *testing.T) {
+	everything := []string{tools.TerminalToolName, tools.PentesterToolName, tools.FileToolName, tools.FinalyToolName}
+
+	tests := []struct {
+		name       string
+		smallModel bool
+		spent      int
+		want       []string
+	}{
+		{name: "a subtask within its budget is offered every tool", smallModel: true, spent: 149, want: everything},
+		{
+			name: "a subtask that spent its budget is offered only what does not run commands", smallModel: true, spent: 150,
+			want: []string{tools.FileToolName, tools.FinalyToolName},
+		},
+		{name: "without the small-model profile there is no budget", smallModel: false, spent: 150, want: everything},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			taskID, subtaskID := int64(9), int64(152)
+			prv := &performerOfferedProvider{Provider: mock.NewProvider(provider.ProviderOpenAI, "openai", "small-model")}
+
+			fp := newFlowProvider()
+			fp.db = &performerScopeQuerier{}
+			fp.Provider = prv
+			fp.prompter = templates.NewDefaultPrompter()
+			fp.cfg.SmallModelMode = tt.smallModel
+			fp.cfg.SmallModelVerifierEnabled = true
+			fp.cfg.SmallModelSubtaskMaxCommands = 150
+			for range tt.spent {
+				fp.smallModelState().IncrSubtaskCommands(subtaskID)
+			}
+
+			err := fp.performAgentChain(
+				context.Background(), pconfig.OptionsTypePrimaryAgent, 42, &taskID, &subtaskID,
+				windowCompactionChain(1, 10), performerToolSetExecutor{names: everything}, nil,
+			)
+
+			require.ErrorIs(t, err, performerLocalRefusal)
+			assert.Equal(t, tt.want, prv.offered)
+		})
+	}
+}
+
+func TestPerformer_PerformAgentChain_LogsTheSmallModelStateBeforeTheCall(t *testing.T) {
+	hook := logtest.NewGlobal()
+	taskID, subtaskID := int64(9), int64(152)
+
+	fp := newFlowProvider()
+	fp.db = &performerScopeQuerier{}
+	fp.Provider = &performerOfferedProvider{Provider: mock.NewProvider(provider.ProviderOpenAI, "openai", "small-model")}
+	fp.prompter = templates.NewDefaultPrompter()
+	fp.cfg.SmallModelMode = true
+	fp.smallModelState().AddFacts(smallmodel.Key{TaskID: taskID}, "22/tcp open: ssh")
+
+	err := fp.performAgentChain(
+		context.Background(), pconfig.OptionsTypePrimaryAgent, 42, &taskID, &subtaskID,
+		windowCompactionChain(1, 10), performerToolSetExecutor{names: []string{tools.FinalyToolName}}, nil,
+	)
+	require.ErrorIs(t, err, performerLocalRefusal)
+
+	var logged []string
+	for _, entry := range hook.AllEntries() {
+		if entry.Message == "small-model state" {
+			logged = append(logged, entry.Data["new_facts"].([]string)...)
+		}
+	}
+	assert.Equal(t, []string{"22/tcp open: ssh"}, logged)
 }
 
 // performerScopeQuerier also serves the subtask reads an agent with a task or a subtask makes for its execution context.
